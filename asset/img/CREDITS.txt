@@ -1,0 +1,25 @@
+Target pictograms
+=================
+
+The PNG pictograms in this directory are from Flaticon (https://www.flaticon.com)
+and are used under the Flaticon Free License, which requires attribution.
+They are NOT covered by this repository's MIT License.
+
+- Pedestrian icon created by Stockio - Flaticon
+  https://www.flaticon.com/kr/free-icons/
+- Man icon created by Stockio - Flaticon
+  https://www.flaticon.com/kr/free-icons/
+- Human icon created by Magnific - Flaticon
+  https://www.flaticon.com/kr/free-icons/
+- Posture icons created by meaicon - Flaticon
+  https://www.flaticon.com/free-icons/posture
+- Lying icons created by Leremy - Flaticon
+  https://www.flaticon.com/free-icons/lying
+
+Original attribution snippets:
+
+<a href="https://www.flaticon.com/kr/free-icons/" title="보행자 아이콘">보행자 아이콘 제작자: Stockio - Flaticon</a>
+<a href="https://www.flaticon.com/kr/free-icons/" title="남자 아이콘">남자 아이콘 제작자: Stockio - Flaticon</a>
+<a href="https://www.flaticon.com/kr/free-icons/" title="인간 아이콘">인간 아이콘 제작자: Magnific - Flaticon</a>
+<a href="https://www.flaticon.com/free-icons/posture" title="posture icons">Posture icons created by meaicon - Flaticon</a>
+<a href="https://www.flaticon.com/free-icons/lying" title="lying icons">Lying icons created by Leremy - Flaticon</a>

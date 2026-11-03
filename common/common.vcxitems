@@ -59,6 +59,7 @@
   </ItemGroup>
   <ItemGroup Condition="'$(RadarCommonUiLibs)' != 'false'">
     <ClInclude Include="$(MSBuildThisFileDirectory)os\dialog.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)os\image.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)os\network.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ui\imgui_custom.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ui\window\console_window.h" />
@@ -187,6 +188,7 @@
   </ItemGroup>
   <ItemGroup Condition="'$(RadarCommonUiLibs)' != 'false'">
     <ClCompile Include="$(MSBuildThisFileDirectory)os\dialog.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)os\image.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)os\network.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)ui\imgui_custom.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)ui\window\console_window.cpp" />

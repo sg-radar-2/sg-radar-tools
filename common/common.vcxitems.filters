@@ -69,6 +69,9 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)os\dialog.h">
       <Filter>os</Filter>
     </ClInclude>
+    <ClInclude Include="$(MSBuildThisFileDirectory)os\image.h">
+      <Filter>os</Filter>
+    </ClInclude>
     <ClInclude Include="$(MSBuildThisFileDirectory)os\network.h">
       <Filter>os</Filter>
     </ClInclude>
@@ -240,6 +243,9 @@
       <Filter>pcr</Filter>
     </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)os\dialog.cpp">
+      <Filter>os</Filter>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)os\image.cpp">
       <Filter>os</Filter>
     </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)os\network.cpp">

@@ -9,6 +9,7 @@
 #include "ui/window/recording_window.h"
 #include "ui/window/sensor_window.h"
 
+#include <common/os/image.h>
 #include <common/ui/imgui_custom.h>
 #include <common/ui/window/console_window.h>
 #include <common/ui/window/docking_window.h>
@@ -32,10 +33,12 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <thread>
 
 #define FONT_AWESOME_PATH "../../asset/font/fa-solid-900.ttf"
+#define PICTOGRAM_DIR "../../asset/img/"
 #define CONSOLAS_FONT_PATH "C:/Windows/Fonts/consola.ttf"
 
 namespace
@@ -67,6 +70,7 @@ MyApp::MyApp()
 		m_hasSavedDockLayout = std::filesystem::exists(io.IniFilename);
 
 	setupWindows();
+	loadPictograms();
 
 	MyGui::applyTheme(MyGui::Theme::Dark);
 	MyPlot3D::applyTheme();
@@ -97,6 +101,7 @@ MyApp::~MyApp()
 
 	ImGui::SaveIniSettingsToDisk(ImGui::GetIO().IniFilename);
 
+	releasePictograms();
 	ImGui_ImplOpenGL3_Shutdown();
 	ImGui_ImplGlfw_Shutdown();
 	ImPlot3D::DestroyContext();
@@ -277,6 +282,104 @@ void MyApp::setSensorSpec(const pcr::SensorSpec& spec)
 void MyApp::resetSensorSpec()
 {
 	setSensorSpec(pcr::SensorSpec{});
+}
+
+unsigned int MyApp::getPictogramTexture(Pictogram pictogram) const
+{
+	const int index = static_cast<int>(pictogram);
+	if (index < 0 || index >= static_cast<int>(Pictogram::Count))
+		return 0;
+	return m_pictogramTextures[index];
+}
+
+void MyApp::loadPictograms()
+{
+	static const char* kFiles[] = {
+		PICTOGRAM_DIR "stand.png",
+		PICTOGRAM_DIR "sit.png",
+		PICTOGRAM_DIR "lying.png",
+		PICTOGRAM_DIR "walk.png",
+	};
+	static_assert(std::size(kFiles) == static_cast<size_t>(Pictogram::Count), "pictogram file list mismatch");
+
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+
+	for (int i = 0; i < static_cast<int>(Pictogram::Count); ++i)
+	{
+		os::ImageRGBA image;
+		if (!os::loadImageRGBA(kFiles[i], image))
+		{
+			log() << "[error] failed to load pictogram: " << kFiles[i] << '\n';
+			continue;
+		}
+
+		// Keep only the alpha mask so the glyph can be tinted with any color.
+		for (size_t p = 0; p < image.pixels.size(); p += 4)
+			image.pixels[p + 0] = image.pixels[p + 1] = image.pixels[p + 2] = 255;
+
+		GLuint texture = 0;
+		glGenTextures(1, &texture);
+		glBindTexture(GL_TEXTURE_2D, texture);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+		// Build the mip chain on the CPU (2x2 box filter); the icons are drawn far smaller than 512px.
+		int width = image.width;
+		int height = image.height;
+		std::vector<std::uint8_t> level = std::move(image.pixels);
+		for (int mip = 0;; ++mip)
+		{
+			glTexImage2D(GL_TEXTURE_2D, mip, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, level.data());
+			if (width == 1 && height == 1)
+				break;
+
+			const int next_width = std::max(1, width / 2);
+			const int next_height = std::max(1, height / 2);
+			std::vector<std::uint8_t> next(static_cast<size_t>(next_width) * next_height * 4);
+			for (int y = 0; y < next_height; ++y)
+			{
+				for (int x = 0; x < next_width; ++x)
+				{
+					const int x0 = std::min(x * 2, width - 1), x1 = std::min(x * 2 + 1, width - 1);
+					const int y0 = std::min(y * 2, height - 1), y1 = std::min(y * 2 + 1, height - 1);
+					for (int c = 0; c < 4; ++c)
+					{
+						const int sum =
+							level[(static_cast<size_t>(y0) * width + x0) * 4 + c] +
+							level[(static_cast<size_t>(y0) * width + x1) * 4 + c] +
+							level[(static_cast<size_t>(y1) * width + x0) * 4 + c] +
+							level[(static_cast<size_t>(y1) * width + x1) * 4 + c];
+						next[(static_cast<size_t>(y) * next_width + x) * 4 + c] = static_cast<std::uint8_t>((sum + 2) / 4);
+					}
+				}
+			}
+
+			level = std::move(next);
+			width = next_width;
+			height = next_height;
+		}
+
+		glBindTexture(GL_TEXTURE_2D, 0);
+		m_pictogramTextures[i] = texture;
+	}
+}
+
+void MyApp::releasePictograms()
+{
+	for (unsigned int& texture : m_pictogramTextures)
+	{
+		if (texture != 0)
+		{
+			const GLuint name = texture;
+			glDeleteTextures(1, &name);
+			texture = 0;
+		}
+	}
 }
 
 void MyApp::initWindow()
@@ -630,6 +733,9 @@ void MyApp::drawMenu()
 		ImGui::Separator();
 		ImGui::Text("Developed by dandevlog0206");
 		ImGui::Text("2026");
+		ImGui::Separator();
+		ImGui::TextUnformatted("Target pictograms from Flaticon (www.flaticon.com)");
+		ImGui::TextUnformatted("created by Stockio, Magnific, meaicon, Leremy");
 		if (ImGui::Button("Close"))
 			ImGui::CloseCurrentPopup();
 		ImGui::EndPopup();

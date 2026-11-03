@@ -58,6 +58,15 @@ public:
 		Failed
 	};
 
+	enum class Pictogram
+	{
+		Standing,
+		Sitting,
+		Lying,
+		Walking,
+		Count
+	};
+
 	static MyApp& get();
 
 	MyApp();
@@ -80,9 +89,14 @@ public:
 	void setSensorSpec(const pcr::SensorSpec& spec);
 	void resetSensorSpec();
 
+	// OpenGL texture name (0 if the image failed to load). White glyph with alpha, so it can be tinted.
+	unsigned int getPictogramTexture(Pictogram pictogram) const;
+
 private:
 	void initWindow();
 	void setupWindows();
+	void loadPictograms();
+	void releasePictograms();
 	void setupDockLayout(unsigned int dockspace_id);
 
 	void updateWindows();
@@ -137,6 +151,8 @@ private:
 	RecordingWindow* m_recordingWindow = nullptr;
 	AnalysisWindow* m_analysisWindow = nullptr;
 	DockingWindow* m_activeWindow = nullptr;
+
+	unsigned int m_pictogramTextures[static_cast<int>(Pictogram::Count)] = {};
 
 	os::LocalNetworkInfo m_networkInfo;
 	float m_networkRefreshTimer = 0.5f;

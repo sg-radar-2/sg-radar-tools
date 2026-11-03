@@ -146,3 +146,4 @@ PC에서 레이더 센서의 포인트 클라우드 데이터를 받은 뒤 분�
 이 저장소의 코드는 MIT 라이선스로 공개되며 저작권은 [www.dandevlog.com에](http://www.dandevlog.com에) 있습니다([LICENSE](LICENSE)).
 서드파티 라이브러리의 라이선스 파일 위치는 [common/thirdparty/NOTICE.txt](common/thirdparty/NOTICE.txt)에 모아 두었습니다.
 UI 아이콘용 Font Awesome 폰트(`asset/font/fa-solid-900.ttf`)는 SIL OFL 1.1 라이선스 조건에 맞춰 [LICENSE.txt](asset/font/LICENSE.txt)를 같이 올려 두었습니다.
+타겟 픽토그램(`asset/img/*.png`)은 [Flaticon](https://www.flaticon.com)의 무료 아이콘이며(제작자: Stockio, Magnific, meaicon, Leremy), MIT 라이선스 대상이 아닙니다. 출처 표기는 [CREDITS.txt](asset/img/CREDITS.txt)와 앱의 Help → About에 있습니다.

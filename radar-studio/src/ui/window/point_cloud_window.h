@@ -58,6 +58,8 @@ private:
 	void drawOrientationLabel();
 	void drawPlaybackControls();
 	void drawFrustum(bool polygon = false);
+	void drawTargetBox(const retina::Target& target, const ImPlot3DSpec& spec);
+	bool drawTargetPictogram(const retina::Target& target);
 	void drawCenteredText(const char* text);
 
 	void resetPlaybackState();
@@ -96,6 +98,7 @@ private:
 	bool m_isRecording = false;
 
 	bool m_showTargets = false;
+	bool m_showTargetPictogram = false;
 	bool m_showGizmo = true;
 	int m_frustumType = 0;
 };
