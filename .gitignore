@@ -71,6 +71,9 @@ recordings/
 *.param
 *.ncnn.bin
 
+## Runtime-generated
+imgui.ini
+
 ## OS / editor
 Thumbs.db
 ehthumbs.db

@@ -737,6 +737,50 @@ namespace MyPlot3D
 
 		ImPlot3D::SetupBoxInitialRotation(state.InitialRotation);
 
+		// Apply pending setup changes before GetPlotRectPos()/GetPlotRectSize(), which lock plot setup.
+		// Changes made by input below are applied on the next frame.
+		if (state.HasPendingRotation)
+		{
+			ImPlot3D::SetupBoxRotation(state.Rotation, state.NeedAnimateRotation, ImPlot3DCond_Always);
+			state.NeedAnimateRotation = false;
+
+			if (rotation)
+				*rotation = state.Rotation;
+
+			state.HasPendingRotation = false;
+		}
+		if (state.HasPendingAxisLimit)
+		{
+			ImPlot3D::SetupAxesLimits(
+				state.AxesBox.Min.x,
+				state.AxesBox.Max.x,
+				state.AxesBox.Min.y,
+				state.AxesBox.Max.y,
+				state.AxesBox.Min.z,
+				state.AxesBox.Max.z,
+				ImPlot3DCond_Always);
+
+			if (axes_box)
+				*axes_box = state.AxesBox;
+
+			state.HasPendingAxisLimit = false;
+		}
+		if (state.HasPendingZoom)
+		{
+			const double x_size = state.AxesBox.Max.x - state.AxesBox.Min.x;
+			const double y_size = state.AxesBox.Max.y - state.AxesBox.Min.y;
+			const double z_size = state.AxesBox.Max.z - state.AxesBox.Min.z;
+			const double xy_size = x_size > 0.0 ? y_size / x_size : 1.0;
+			const double xz_size = x_size > 0.0 ? z_size / x_size : 1.0;
+
+			ImPlot3D::SetupBoxScale(state.Zoom, xy_size * state.Zoom, xz_size * state.Zoom);
+
+			if (zoom)
+				*zoom = state.Zoom;
+
+			state.HasPendingZoom = false;
+		}
+
 		ImDrawList* draw_list = ImGui::GetWindowDrawList();
 		const ImGuiIO& io = ImGui::GetIO();
 
@@ -852,48 +896,6 @@ namespace MyPlot3D
 				state.HasPendingZoom = true;
 				result_flags = (ImPlot3DViewGizmoFlags)(result_flags | ImPlot3DViewGizmoFlags_ScaleChanged);
 			}
-		}
-
-		if (state.HasPendingRotation)
-		{
-			ImPlot3D::SetupBoxRotation(state.Rotation, state.NeedAnimateRotation, ImPlot3DCond_Always);
-			state.NeedAnimateRotation = false;
-
-			if (rotation)
-				*rotation = state.Rotation;
-
-			state.HasPendingRotation = false;
-		}
-		if (state.HasPendingAxisLimit)
-		{
-			ImPlot3D::SetupAxesLimits(
-				state.AxesBox.Min.x,
-				state.AxesBox.Max.x,
-				state.AxesBox.Min.y,
-				state.AxesBox.Max.y,
-				state.AxesBox.Min.z,
-				state.AxesBox.Max.z,
-				ImPlot3DCond_Always);
-
-			if (axes_box)
-				*axes_box = state.AxesBox;
-
-			state.HasPendingAxisLimit = false;
-		}
-		if (state.HasPendingZoom)
-		{
-			const double x_size = state.AxesBox.Max.x - state.AxesBox.Min.x;
-			const double y_size = state.AxesBox.Max.y - state.AxesBox.Min.y;
-			const double z_size = state.AxesBox.Max.z - state.AxesBox.Min.z;
-			const double xy_size = x_size > 0.0 ? y_size / x_size : 1.0;
-			const double xz_size = x_size > 0.0 ? z_size / x_size : 1.0;
-
-			ImPlot3D::SetupBoxScale(state.Zoom, xy_size * state.Zoom, xz_size * state.Zoom);
-
-			if (zoom)
-				*zoom = state.Zoom;
-
-			state.HasPendingZoom = false;
 		}
 
 		const bool center_hovered = visible_hovered_part == GizmoPart_Center;
