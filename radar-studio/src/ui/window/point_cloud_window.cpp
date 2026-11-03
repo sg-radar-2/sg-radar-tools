@@ -330,7 +330,7 @@ void PointCloudWindow::onDraw(const ImVec2& size)
 				spec.FillAlpha = 0.1f;
 				for (const auto& target : m_currFrame->targets)
 				{
-					if (m_showTargetPictogram && drawTargetPictogram(target))
+					if (m_showTargetPictogram && queueTargetPictogram(target))
 						continue;
 					drawTargetBox(target, spec);
 				}
@@ -341,6 +341,7 @@ void PointCloudWindow::onDraw(const ImVec2& size)
 			drawFrustum(m_frustumType == 2);
 
 		ImPlot3D::EndPlot();
+		drawQueuedPictograms();
 	}
 
 	if (m_source == WindowSource::Sensor)
@@ -892,7 +893,7 @@ void PointCloudWindow::drawTargetBox(const retina::Target& target, const ImPlot3
 	MyPlot3D::PlotBox("##TargetBox", target.minx, target.maxx, target.miny, target.maxy, target.minz, target.maxz, spec);
 }
 
-bool PointCloudWindow::drawTargetPictogram(const retina::Target& target)
+bool PointCloudWindow::queueTargetPictogram(const retina::Target& target)
 {
 	const unsigned int texture = MyApp::get().getPictogramTexture(get_target_pictogram(target));
 	if (texture == 0)
@@ -907,25 +908,41 @@ bool PointCloudWindow::drawTargetPictogram(const retina::Target& target)
 	if (!ImPlot3DBox(plot.RangeMin(), plot.RangeMax()).Contains(anchor))
 		return true;
 
-	const ImVec2 center = ImPlot3D::PlotToPixels(anchor);
-	const ImVec2 half(kTargetPictogramSize * 0.5f, kTargetPictogramSize * 0.5f);
-	const ImVec2 icon_min(center.x - half.x, center.y - half.y);
-	const ImVec2 icon_max(center.x + half.x, center.y + half.y);
+	if (m_queuedPictograms.empty())
+	{
+		const ImVec2 plot_pos = ImPlot3D::GetPlotRectPos();
+		const ImVec2 plot_size = ImPlot3D::GetPlotRectSize();
+		m_pictogramClipMin = plot_pos;
+		m_pictogramClipMax = ImVec2(plot_pos.x + plot_size.x, plot_pos.y + plot_size.y);
+	}
+
+	m_queuedPictograms.push_back({ ImPlot3D::PlotToPixels(anchor), texture, target.targetId });
+	return true;
+}
+
+void PointCloudWindow::drawQueuedPictograms()
+{
+	if (m_queuedPictograms.empty())
+		return;
+
 	const ImU32 color = ImPlot3D::GetStyleColorU32(ImPlot3DCol_InlayText);
+	const ImVec2 half(kTargetPictogramSize * 0.5f, kTargetPictogramSize * 0.5f);
 
-	const ImVec2 plot_pos = ImPlot3D::GetPlotRectPos();
-	const ImVec2 plot_size = ImPlot3D::GetPlotRectSize();
+	ImDrawList* draw_list = ImGui::GetWindowDrawList();
+	draw_list->PushClipRect(m_pictogramClipMin, m_pictogramClipMax, true);
+	for (const QueuedPictogram& pictogram : m_queuedPictograms)
+	{
+		const ImVec2 icon_min(pictogram.center.x - half.x, pictogram.center.y - half.y);
+		const ImVec2 icon_max(pictogram.center.x + half.x, pictogram.center.y + half.y);
+		draw_list->AddImage(static_cast<ImTextureID>(pictogram.texture), icon_min, icon_max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), color);
 
-	ImDrawList* draw_list = ImPlot3D::GetPlotDrawList();
-	draw_list->PushClipRect(plot_pos, ImVec2(plot_pos.x + plot_size.x, plot_pos.y + plot_size.y), true);
-	draw_list->AddImage(static_cast<ImTextureID>(texture), icon_min, icon_max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), color);
-
-	const std::string id_text = std::to_string(target.targetId);
-	const ImVec2 text_size = ImGui::CalcTextSize(id_text.c_str());
-	draw_list->AddText(ImVec2(center.x - text_size.x * 0.5f, icon_min.y - text_size.y), color, id_text.c_str());
+		const std::string id_text = std::to_string(pictogram.targetId);
+		const ImVec2 text_size = ImGui::CalcTextSize(id_text.c_str());
+		draw_list->AddText(ImVec2(pictogram.center.x - text_size.x * 0.5f, icon_min.y - text_size.y), color, id_text.c_str());
+	}
 	draw_list->PopClipRect();
 
-	return true;
+	m_queuedPictograms.clear();
 }
 
 void PointCloudWindow::drawFrustum(bool polygon)

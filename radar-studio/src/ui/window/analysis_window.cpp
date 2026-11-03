@@ -281,9 +281,8 @@ void AnalysisWindow::drawTargetSelector()
 
 			selected_all = selected_all && selected;
 		}
-
-		ImGui::EndChild();
 	}
+	ImGui::EndChild();
 
 	ImGui::Dummy(ImVec2(0.0f, 15.0f));
 }

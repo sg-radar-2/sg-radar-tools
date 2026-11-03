@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 class PointCloudWindow : public DockingWindow
 {
@@ -59,7 +60,8 @@ private:
 	void drawPlaybackControls();
 	void drawFrustum(bool polygon = false);
 	void drawTargetBox(const retina::Target& target, const ImPlot3DSpec& spec);
-	bool drawTargetPictogram(const retina::Target& target);
+	bool queueTargetPictogram(const retina::Target& target);
+	void drawQueuedPictograms();
 	void drawCenteredText(const char* text);
 
 	void resetPlaybackState();
@@ -99,6 +101,17 @@ private:
 
 	bool m_showTargets = false;
 	bool m_showTargetPictogram = false;
+
+	// Pictograms are drawn after EndPlot() so they overlay the 3D layer instead of sitting under it.
+	struct QueuedPictogram
+	{
+		ImVec2 center;
+		unsigned int texture;
+		uint32_t targetId;
+	};
+	std::vector<QueuedPictogram> m_queuedPictograms;
+	ImVec2 m_pictogramClipMin;
+	ImVec2 m_pictogramClipMax;
 	bool m_showGizmo = true;
 	int m_frustumType = 0;
 };

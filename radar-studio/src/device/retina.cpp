@@ -673,52 +673,51 @@ namespace retina
 	
 		CHECK_READ(reader.peek(frame_header));
 
+		// Retina devices place the target section at a fixed offset; the emulator writes it right after the points.
 		if (frame_header.magic != kFrameMagic)
-		{
 			reader.seek(kTargetOffset);
 
-			CHECK_READ(reader.read(frame_header));
+		CHECK_READ(reader.read(frame_header));
 	
-			if (frame_header.magic != kFrameMagic)
+		if (frame_header.magic != kFrameMagic)
+		{
+			m_log << "[error] retina: invalid frame magic for target section: " << std::hex << frame_header.magic << std::dec << '\n';
+			return false;
+		}
+	
+		assert(frame_header.frameCount == out_frame.frameCount);
+	
+		target_number = frame_header.targetNumber;
+		out_frame.targets.reserve(target_number);
+	
+		for (uint32_t i = 0; i < target_number; ++i)
+		{
+			RetinaTargetRaw target_raw;
+			CHECK_READ(reader.read(target_raw));
+	
+			Target target{};
+			target.minx = target.miny = target.minz = std::numeric_limits<float>::max();
+			target.maxx = target.maxy = target.maxz = std::numeric_limits<float>::lowest();
+	
+			target.x = target_raw.x;
+			target.y = target_raw.y;
+			target.status = target_raw.status;
+			target.targetId = target_raw.targetId;
+	
+			for (const auto& p : out_frame.points)
 			{
-				m_log << "[error] retina: invalid frame magic for target section: " << std::hex << frame_header.magic << std::dec << '\n';
-				return false;
-			}
-	
-			assert(frame_header.frameCount == out_frame.frameCount);
-	
-			target_number = frame_header.targetNumber;
-			out_frame.targets.reserve(target_number);
-	
-			for (uint32_t i = 0; i < target_number; ++i)
-			{
-				RetinaTargetRaw target_raw;
-				CHECK_READ(reader.read(target_raw));
-	
-				Target target{};
-				target.minx = target.miny = target.minz = std::numeric_limits<float>::max();
-				target.maxx = target.maxy = target.maxz = std::numeric_limits<float>::lowest();
-	
-				target.x = target_raw.x;
-				target.y = target_raw.y;
-				target.status = target_raw.status;
-				target.targetId = target_raw.targetId;
-	
-				for (const auto& p : out_frame.points)
+				if (p.targetId == target.targetId)
 				{
-					if (p.targetId == target.targetId)
-					{
-						target.minx = std::min(target.minx, p.x);
-						target.maxx = std::max(target.maxx, p.x);
-						target.miny = std::min(target.miny, p.y);
-						target.maxy = std::max(target.maxy, p.y);
-						target.minz = std::min(target.minz, p.z);
-						target.maxz = std::max(target.maxz, p.z);
-					}
+					target.minx = std::min(target.minx, p.x);
+					target.maxx = std::max(target.maxx, p.x);
+					target.miny = std::min(target.miny, p.y);
+					target.maxy = std::max(target.maxy, p.y);
+					target.minz = std::min(target.minz, p.z);
+					target.maxz = std::max(target.maxz, p.z);
 				}
-	
-				out_frame.targets.push_back(target);
 			}
+	
+			out_frame.targets.push_back(target);
 		}
 	
 		return true;
