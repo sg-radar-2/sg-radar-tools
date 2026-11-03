@@ -129,6 +129,14 @@ void SensorWindow::drawConnection()
 	{
 		if (ImGui::Button("Auto Connect"))
 			app.connect();
+
+		// Manual connect: type the radar IP (e.g. from Retina Finder) and connect directly
+		static char host_buf[32] = "";
+		ImGui::SetNextItemWidth(140.0f);
+		ImGui::InputTextWithHint("##host", "10.1.163.57", host_buf, sizeof(host_buf));
+		ImGui::SameLine();
+		if (ImGui::Button("Connect to IP") && host_buf[0] != '\0')
+			app.connect(host_buf);
 	}
 	else if (status == MyApp::ConnectionStatus::Finding)
 	{

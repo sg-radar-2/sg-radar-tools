@@ -31,17 +31,21 @@ namespace os
 
 #ifdef _WIN32
 		ULONG buffer_size = 0;
-		if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, nullptr, &buffer_size) != ERROR_BUFFER_OVERFLOW)
+		if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_INCLUDE_GATEWAYS, nullptr, nullptr, &buffer_size) != ERROR_BUFFER_OVERFLOW)
 			return false;
 
 		std::vector<unsigned char> buffer(buffer_size);
 		IP_ADAPTER_ADDRESSES* adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
-		if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, adapters, &buffer_size) != NO_ERROR)
+		if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_INCLUDE_GATEWAYS, nullptr, adapters, &buffer_size) != NO_ERROR)
 			return false;
 
 		for (IP_ADAPTER_ADDRESSES* adapter = adapters; adapter != nullptr; adapter = adapter->Next)
 		{
 			if (adapter->OperStatus != IfOperStatusUp)
+				continue;
+
+			// Skip adapters without a default gateway (VM / virtual adapters)
+			if (adapter->FirstGatewayAddress == nullptr)
 				continue;
 			for (IP_ADAPTER_UNICAST_ADDRESS* unicast = adapter->FirstUnicastAddress; unicast != nullptr; unicast = unicast->Next)
 			{
