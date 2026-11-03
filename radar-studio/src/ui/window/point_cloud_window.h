@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 class PointCloudWindow : public DockingWindow
@@ -112,6 +113,14 @@ private:
 	std::vector<QueuedPictogram> m_queuedPictograms;
 	ImVec2 m_pictogramClipMin;
 	ImVec2 m_pictogramClipMax;
+
+	// Display-only smoothing of the pictogram height (the packet has no z, so it comes from the noisy point box).
+	struct SmoothedHeight
+	{
+		double z;
+		int lastFrame;
+	};
+	std::unordered_map<uint32_t, SmoothedHeight> m_pictogramHeights;
 	bool m_showGizmo = true;
 	int m_frustumType = 0;
 };

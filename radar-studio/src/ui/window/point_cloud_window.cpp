@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 
 namespace
 {
@@ -46,6 +47,7 @@ namespace
 
 	constexpr ImPlot3DQuat kDefaultViewRotation(-0.513269, -0.212596, -0.318184, 0.76819);
 	constexpr float kTargetPictogramSize = 48.0f;
+	constexpr double kTargetPictogramHeightSmoothing = 0.3; // seconds (time constant)
 
 	// TODO: split fast-doppler Walking into a Running pictogram.
 	MyApp::Pictogram get_target_pictogram(const retina::Target& target)
@@ -899,10 +901,28 @@ bool PointCloudWindow::queueTargetPictogram(const retina::Target& target)
 	if (texture == 0)
 		return false;
 
-	const ImPlot3DPoint anchor(
-		(target.minx + target.maxx) * 0.5,
-		(target.miny + target.maxy) * 0.5,
-		(target.minz + target.maxz) * 0.5);
+	// Use the radar's tracked position for x/y: the box is rebuilt from noisy points every frame and jitters.
+	// The packet carries no height, so z comes from the box and is smoothed per target for display.
+	const int frame = ImGui::GetFrameCount();
+	const bool has_box = target.minz <= target.maxz;
+	const double raw_z = has_box ? (target.minz + target.maxz) * 0.5 : 0.0;
+
+	auto it = m_pictogramHeights.find(target.targetId);
+	if (it == m_pictogramHeights.end() || it->second.lastFrame < frame - 1)
+	{
+		it = m_pictogramHeights.insert_or_assign(target.targetId, SmoothedHeight{ raw_z, frame }).first;
+	}
+	else if (it->second.lastFrame != frame)
+	{
+		if (has_box)
+		{
+			const double alpha = 1.0 - std::exp(-ImGui::GetIO().DeltaTime / kTargetPictogramHeightSmoothing);
+			it->second.z += (raw_z - it->second.z) * alpha;
+		}
+		it->second.lastFrame = frame;
+	}
+
+	const ImPlot3DPoint anchor(target.x, target.y, it->second.z);
 
 	const ImPlot3DPlot& plot = *ImPlot3D::GetCurrentPlot();
 	if (!ImPlot3DBox(plot.RangeMin(), plot.RangeMax()).Contains(anchor))
@@ -922,6 +942,10 @@ bool PointCloudWindow::queueTargetPictogram(const retina::Target& target)
 
 void PointCloudWindow::drawQueuedPictograms()
 {
+	const int frame = ImGui::GetFrameCount();
+	for (auto it = m_pictogramHeights.begin(); it != m_pictogramHeights.end();)
+		it = it->second.lastFrame < frame - 1 ? m_pictogramHeights.erase(it) : std::next(it);
+
 	if (m_queuedPictograms.empty())
 		return;
 
