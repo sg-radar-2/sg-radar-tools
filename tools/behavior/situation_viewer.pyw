@@ -93,11 +93,15 @@ class Viewer(ttk.Frame):
     def _build(self):
         bar = ttk.Frame(self, padding=(8, 8, 8, 2))
         bar.pack(fill="x")
-        ttk.Button(bar, text="CSV 열기...", command=self.pick_csv).pack(side="left")
+        ttk.Button(bar, text="CSV/PCR 열기...", command=self.pick_csv).pack(side="left")
         ttk.Button(bar, text="가짜 시나리오 새로 만들기", command=self.load_demo).pack(side="left", padx=4)
-        ttk.Button(bar, text="결정 트리 다시 학습", command=lambda: self._load_models(None, force=True)).pack(side="left")
+        ttk.Button(bar, text="모델 열기...", command=self.pick_model).pack(side="left")
+        ttk.Button(bar, text="가짜 데이터로 다시 학습",
+                   command=lambda: self._load_models(None, force=True)).pack(side="left", padx=4)
         self.path_var = tk.StringVar(value="결정 트리를 준비하는 중...")
         ttk.Label(bar, textvariable=self.path_var, foreground="#555").pack(side="left", padx=10)
+        self.model_var = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.model_var, foreground="#1f4e79").pack(side="right")
 
         ctl = ttk.Frame(self, padding=(8, 2, 8, 6))
         ctl.pack(fill="x")
@@ -205,9 +209,7 @@ class Viewer(ttk.Frame):
             if "err" in box:
                 messagebox.showerror("학습 실패", box["err"][-1500:])
                 return
-            self.models = box["m"]
-            self.tree_text.delete("1.0", "end")
-            self.tree_text.insert("1.0", self.models.report)
+            self._set_models(box["m"], "가짜 데이터 모델")
             if initial:
                 self.open_csv(initial)
             elif self.tracks:
@@ -217,23 +219,43 @@ class Viewer(ttk.Frame):
 
         wait()
 
+    def _set_models(self, models, name):
+        self.models = models
+        self.model_var.set(f"모델: {name}")
+        self.tree_text.delete("1.0", "end")
+        self.tree_text.insert("1.0", self.models.report)
+
+    def pick_model(self):
+        p = filedialog.askopenfilename(title="결정 트리 모델 열기", initialdir=C.MODEL_PATH.parent,
+                                       filetypes=[("모델", "*.pkl"), ("모든 파일", "*.*")])
+        if not p:
+            return
+        try:
+            self._set_models(C.load_models(p), Path(p).name)
+        except Exception as exc:
+            messagebox.showerror("모델 열기 실패", str(exc))
+            return
+        if self.tracks:
+            self._analyze_and_show(self.path_var.get(), self._rows)
+
     def pick_csv(self):
         start = C.HERE.parents[1] / "recordings"
-        p = filedialog.askopenfilename(title="트랙 CSV 열기", initialdir=start if start.is_dir() else C.HERE,
-                                       filetypes=[("트랙 CSV", "*_tracks_raw.csv *.csv"), ("모든 파일", "*.*")])
+        p = filedialog.askopenfilename(title="트랙 CSV 또는 PCR 열기",
+                                       initialdir=start if start.is_dir() else C.HERE,
+                                       filetypes=[("트랙 CSV / PCR", "*.csv *.pcr"), ("모든 파일", "*.*")])
         if p:
             self.open_csv(p)
 
     def open_csv(self, path):
         try:
-            rows = C.read_csv_rows(path)
+            rows = C.load_rows(path)
         except Exception as exc:
             messagebox.showerror("열기 실패", str(exc))
             return
         if rows and "doppler_std" not in rows[0]:
             messagebox.showinfo("참고", "이 CSV에는 doppler_std(손 움직임) 열이 없어서 기본값으로 계산합니다.\n"
                                       "tools/pcr/to_numpy_gui.pyw로 다시 변환하면 정확해집니다.")
-        self._analyze_and_show(str(path), rows)
+        self._analyze_and_show(Path(path).name, rows)
 
     def load_demo(self, first=False):
         if not first:
@@ -434,7 +456,7 @@ class Viewer(ttk.Frame):
         parts = []
         for tr, i, ended, sit, prob, feat, n_people in panel:
             obs = C.observations(tr, i, n_people, ended=ended)
-            why = C.explain(self.models, feat)
+            why = [] if getattr(tr, "out_of_range", False) else C.explain(self.models, feat)
             parts.append((tr, ended, sit, prob, obs, why))
         key = repr([(p[0].target_id, p[1], p[2], round(p[3], 2), p[4], p[5]) for p in parts])
         if key == self._panel_cache:
@@ -446,7 +468,9 @@ class Viewer(ttk.Frame):
         if not parts:
             tx.insert("end", "지금 잡힌 사람이 없습니다.", "k")
         for tr, ended, sit, prob, obs, why in parts:
-            head = f"트랙 T{tr.target_id}" + ("  (사라짐 - 최종 판정)" if ended else "") + "\n"
+            head = (f"트랙 T{tr.target_id}" + ("  (사라짐 - 최종 판정)" if ended else "")
+                    + (f"  (감시 범위 {C.WATCH_R:.0f}m 밖 - 판정 안 함)" if getattr(tr, "out_of_range", False) else "")
+                    + "\n")
             tx.insert("end", head, "h")
             for k, v in obs:
                 tx.insert("end", f"  {k}\t", "k")

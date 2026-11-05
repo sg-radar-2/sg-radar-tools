@@ -43,7 +43,13 @@ def _float(v, default=math.nan) -> float:
 
 
 def read_rows(path: Path) -> list[dict]:
-    with open(path, newline="", encoding="utf-8-sig") as f:
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:          # 엑셀로 저장한 CSV (CP949)
+        text = raw.decode("cp949")
+    import io
+    with io.StringIO(text, newline="") as f:
         rows = list(csv.DictReader(f))
     if not rows:
         return rows

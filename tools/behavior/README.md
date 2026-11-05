@@ -142,3 +142,37 @@ pip install numpy matplotlib scikit-learn
 - 실제 녹화 4개에 돌려본 결과: 앞뒤 걷기 → 반복 접근(촬영), 둥글게 걷기 → 배회(촬영), 3m 앞에 서 있기 → 판단 중, 좌우 걷기 → 대부분 통과·판단 중이지만 마지막 사람(문 앞 1m를 19초 동안 세 번 왕복)은 반복 접근 → 배회로 촬영됨. 이런 경우를 이상으로 볼지는 팀에서 정해야 합니다.
 - 트랙은 레이더 ID 그대로 씁니다 (behavior_classifier.py의 ID 이어 붙이기는 아직 안 들어감).
 - 녹화에 정답을 붙이면 `scenario_sim.training_episodes()` 대신 그 녹화로 `situation_core.train()`을 돌리면 됩니다.
+
+## 실제 녹화로 학습하기 (`train_situation.py`)
+
+1. **녹화**: 시도 하나를 세션 하나(또는 파일 하나)로 찍습니다. 실수로 앞 내용이 누적됐다면 `tools/pcr/split_cumulative.py`로 먼저 나눕니다.
+2. **정답 표** `recordings/labels.csv` (UTF-8). 파일 경로는 정답 표가 있는 폴더 기준입니다.
+
+   ```
+   file,situation,split,decide_s,target_id,session
+   split/1-1.pcr,통과,train,2,,
+   split/1-5.pcr,통과,test,2,,
+   split/2-1.pcr,배회,train,10,,
+   split/2-3.pcr,배회,test,10,,
+   ```
+
+   | 열 | 뜻 |
+   |---|---|
+   | file | `.pcr` 또는 `_tracks_raw.csv` (pcr을 바로 넣어도 됨) |
+   | situation | 통과 / 귀가 / 외출 / 방문/배달 / 장시간 체류 / 배회 / 반복 접근 / 도어락 조작 시도 / 판단 중 |
+   | split | `train` 학습에 사용, `test` 판정만 해보기 |
+   | decide_s | 트랙이 잡힌 뒤 몇 초부터 그 상황이라고 말할 수 있는지. 그 전은 '판단 중'으로 학습. 비우면 처음부터 |
+   | target_id | 그 행동을 한 사람의 레이더 ID (공백으로 여러 개). 비우면 5m 안까지 들어온 트랙 전부 |
+   | session | 파일 안 세션 이름. 비우면 전부 |
+
+3. **학습**
+
+   ```bat
+   python tools\behavior\train_situation.py recordings\labels.csv
+   ```
+
+   학습에 쓴 트랙과 뺀 트랙, test 녹화의 판정 결과(트랙별 최종 판정, 촬영 여부), 학습된 트리가 출력되고 모델이 `tools/behavior/models/situation_trees_real.pkl`에 저장됩니다. 옵션: `--with-sim`(가짜 데이터 섞기), `--depth`, `--min-leaf`, `--max-r`, `--out`.
+
+4. **확인**: `situation_viewer.pyw` → **모델 열기...** → `situation_trees_real.pkl` → **CSV/PCR 열기...** 로 test 녹화를 재생합니다.
+
+움직임 트리(다가옴/멀어짐/지나감/정지)는 가짜 데이터로 학습한 것을 그대로 쓰고, 상황 트리만 실제 녹화로 다시 학습합니다. 판정할 때도 한 번도 5m 안에 들어오지 않은 트랙(멀리 있는 벽·물체)은 판정하지 않습니다.

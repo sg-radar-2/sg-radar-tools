@@ -42,6 +42,7 @@ APPROACH_MIN_DR = 0.4    # 접근/이탈 1회로 세는 거리 변화
 SNAP_STEP_S = 0.5        # 상황 트리 학습용 스냅샷 간격
 CAMERA_PROB = 0.6        # 이상 상황 확률이 이 이상이고
 CAMERA_HOLD_S = 1.0      # 이 시간 이상 유지되면 촬영
+WATCH_R = 5.0            # 한 번도 이 거리 안에 들어오지 않은 트랙(멀리 있는 벽·물체 등)은 판정하지 않음
 
 MOTION_FEATURES = ["speed", "vr", "radial_ratio", "doppler_win"]
 SITUATION_FEATURES = ["elapsed", "appear_r", "cur_r", "min_r", "rise_from_min", "cur_still_s",
@@ -107,12 +108,60 @@ def _f(v, default=math.nan):
         return default
 
 
+def open_csv_text(path: str | Path):
+    """UTF-8(BOM 있어도 됨)로 읽고, 안 되면 엑셀이 저장하는 CP949(한국어 Windows 기본)로 읽는다."""
+    import io
+    raw = Path(path).read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("cp949")
+    return io.StringIO(text, newline="")
+
+
 def read_csv_rows(path: str | Path) -> list[dict]:
-    with open(path, newline="", encoding="utf-8-sig") as f:
+    with open_csv_text(path) as f:
         rows = list(csv.DictReader(f))
     if rows and not {"time_s", "target_id", "x", "y"} <= set(rows[0]):
         raise ValueError("트랙 CSV가 아닙니다 (time_s, target_id, x, y 열 필요)")
     return rows
+
+
+def rows_from_pcr(path: str | Path) -> list[dict]:
+    """.pcr을 바로 읽어서 트랙 CSV와 같은 행 목록으로 만든다 (tools/pcr/to_numpy_gui.pyw 사용)."""
+    import importlib.machinery
+    import importlib.util
+    import sys as _sys
+    src = HERE.parent / "pcr" / "to_numpy_gui.pyw"
+    if "to_numpy_gui" in _sys.modules:
+        tn = _sys.modules["to_numpy_gui"]
+    else:
+        loader = importlib.machinery.SourceFileLoader("to_numpy_gui", str(src))
+        spec = importlib.util.spec_from_loader("to_numpy_gui", loader)
+        tn = importlib.util.module_from_spec(spec)
+        _sys.modules["to_numpy_gui"] = tn
+        loader.exec_module(tn)
+    a = tn.pcr_to_arrays(path, with_points=False)
+    names = {int(i): str(n) for i, n in zip(a["session_ids"], a["session_names"])}
+    tg, dop = a["targets"], a["target_doppler"]
+    return [{
+        "session": names.get(int(sid), str(sid)), "time_s": t[0], "frame_id": int(t[1]),
+        "target_id": int(t[2]), "x": t[3], "y": t[4], "status": int(t[5]), "n_points": int(n),
+        "doppler_mean": d[0], "doppler_std": d[2],
+    } for t, sid, n, d in zip(tg, a["target_session"], a["target_n_points"], dop)]
+
+
+def load_rows(path: str | Path) -> list[dict]:
+    """트랙 CSV 또는 .pcr"""
+    return rows_from_pcr(path) if str(path).lower().endswith(".pcr") else read_csv_rows(path)
+
+
+def load_models(path: str | Path) -> "Models":
+    with open(path, "rb") as f:
+        m = pickle.load(f)
+    if not hasattr(m, "situation"):
+        raise ValueError("결정 트리 모델 파일이 아닙니다")
+    return m
 
 
 def tracks_from_rows(rows: list[dict]) -> list[Track]:
@@ -387,6 +436,12 @@ def load_or_train(force: bool = False, on_status=None) -> Models:
 def analyze(tracks: list[Track], models: Models) -> list[Track]:
     for tr in tracks:
         _prepare(tr, models.motion)
+        tr.out_of_range = bool(tr.r.min() > WATCH_R)
+        if tr.out_of_range:     # 감시 범위 밖: 판정·촬영 안 함
+            tr.sit_pred = np.array([UNDECIDED] * len(tr.t), dtype=object)
+            tr.sit_prob = np.ones(len(tr.t))
+            tr.final_pred, tr.final_prob, tr.cameras = UNDECIDED, 1.0, []
+            continue
         proba = models.situation.predict_proba(tr.sfeat)
         classes = models.situation.classes_
         k = proba.argmax(axis=1)
