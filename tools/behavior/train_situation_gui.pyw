@@ -261,10 +261,8 @@ class TrainApp(ttk.Frame):
     def _rules_intro() -> str:
         return ("상황 정의 조건 (결정 트리가 골라도 이 조건을 어기면 다음으로 확률 높은 상황을 고름.\n"
                 "학습할 때도 이 조건을 아직 못 채운 순간은 정답을 '판단 중'으로 바꿔서 학습함)\n\n"
-                + C.rules_text() + "\n\n"
-                "문에서 나옴: 레이더 바로 앞(1m 안)에서 처음 잡혔거나, 1.75m 안에서 잡힌 뒤 0.6초 동안 레이더에서 곧장 멀어짐\n"
-                "문으로 사라짐: 레이더 1m 안에서 사라짐\n"
-                "외곽: 측정 영역 좌우·먼 쪽 끝, 시야각 끝에서 0.5m 안\n")
+                + C.rules_text() + "\n\n" + C.places_text() + "\n"
+                "(위 값은 situation_core.py의 설정값입니다)\n")
 
     def _text(self, master, font, wrap="word"):
         tx = tk.Text(master, wrap=wrap, font=font, padx=8, pady=6)

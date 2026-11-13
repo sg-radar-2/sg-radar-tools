@@ -52,7 +52,6 @@ M_APPROACH = "다가옴"
 M_LEAVE = "멀어짐"
 M_PASS = "지나감"
 M_STILL = "정지"
-MOTIONS = [M_APPROACH, M_LEAVE, M_PASS, M_STILL]
 
 HFOV_HALF = math.radians(45)
 RANGE_RES = 0.075

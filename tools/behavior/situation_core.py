@@ -8,8 +8,10 @@
      어떤 상황이었는지만 고름 (진행 중 판정과 최종 판정을 한 트리로 같이 하면 최종 샘플이 너무 적어서 따로 둠)
   고른 상황이 상황 정의 조건(RULES)을 어기면 다음으로 확률 높은 상황을 고릅니다.
 상황 트리가 '이상' 상황을 CAMERA_PROB 이상 확률로 CAMERA_HOLD_S 동안 유지하면 카메라 촬영 이벤트를 냅니다.
+최종 판정은 이상 행동 1순위, 정상 행동 2순위 (predict 설명 참고).
 
-지금은 scenario_sim.py의 가짜 데이터로 학습합니다. 녹화에 정답을 붙이면 같은 방식으로 다시 학습하면 됩니다.
+움직임 트리와 기본 모델(models/situation_trees.pkl)은 scenario_sim.py의 가짜 데이터로 학습하고,
+녹화로 학습하는 것은 train_situation.py / train_situation_gui.pyw가 이 모듈을 써서 합니다.
 필요: numpy, scikit-learn
 """
 
@@ -26,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from scenario_sim import (ABNORMAL, M_APPROACH, M_LEAVE, M_PASS, M_STILL,  # noqa: F401
-                          MOTIONS, SITUATIONS, UNDECIDED, training_episodes)
+                          SITUATIONS, UNDECIDED, training_episodes)
 
 HERE = Path(__file__).resolve().parent
 MODEL_PATH = HERE / "models" / "situation_trees.pkl"
@@ -44,7 +46,6 @@ DOOR_R = 0.6             # 문 바로 앞
 NEAR_R = 2.0             # 근처
 STILL_NEAR_R = 1.5       # '머문 시간'을 세는 범위
 LONG_STAY_S = 10.0       # 머문 시간 '오래' 기준 (표시용)
-APPEAR_DOOR_R = 0.8      # 이 안에서 처음 잡히면 '문에서 나옴'
 APPROACH_MIN_DR = 0.4    # 접근/이탈 1회로 세는 거리 변화
 SNAP_STEP_S = 0.5        # 상황 트리 학습용 스냅샷 간격
 CAMERA_PROB = 0.6        # 이상 상황 확률이 이 이상이고
@@ -82,7 +83,8 @@ OUT_MAX_APPROACH = 0.4   # 외출: 처음 잡힌 곳보다 이 이상 문에 가
 DOOR_EXIT_R = 1.75       # 처음 잡힌 곳이 이 거리 안이고
 DOOR_EXIT_WIN_S = 0.6    # 처음 이 시간 동안
 DOOR_EXIT_MIN_MOVE = 0.25  # 이만큼 이상 움직였는데
-DOOR_EXIT_RADIAL = 0.6   # 움직임 중 레이더에서 곧장 멀어지는 비율이 이 이상이면 '문에서 나옴'
+DOOR_EXIT_RADIAL = 0.8   # 움직임 중 레이더에서 곧장 멀어지는 비율이 이 이상이면 '문에서 나옴'
+                         # (실제 외출 0.87~0.96. 0.6이면 1.33m에서 바깥으로 비스듬히 걸어간 통과(1-8, 0.70)도 외출로 봄)
 
 SIM_REGION = dict(xmin=-3.5, xmax=3.5, ymin=0.0, ymax=4.0, fov_deg=90.0, yaw_deg=0.0)  # 가짜 데이터용
 
@@ -124,9 +126,6 @@ FEATURE_KO = {
     "approach_depth": "처음 잡힌 곳보다 문에 가까이 간 정도(m)",
     "appear_door": "문에서 나옴(1=예)",
 }
-OLD_FEATURES_V1 = ["elapsed", "appear_r", "cur_r", "min_r", "rise_from_min", "cur_still_s",
-                   "max_still_s", "door_still_s", "hand_still", "n_approach", "n_leave",
-                   "path_len", "straightness", "lateral_frac", "sit_frac", "ended"]
 STATUS_KO = {0: "서 있음", 1: "앉음·숙임", 2: "누움", 4: "서 있음(걷는 중)"}
 
 
@@ -315,7 +314,7 @@ def load_models(path: str | Path) -> "Models":
 
 def check_model(m) -> None:
     """특징 목록이 지금 코드와 같은지 확인 (예전 특징으로 학습한 모델은 다시 학습해야 함)"""
-    feats = getattr(m, "feature_names", OLD_FEATURES_V1)
+    feats = getattr(m, "feature_names", None) or []     # 특징 목록이 없는 건 첫 버전 모델
     if list(feats) == SITUATION_FEATURES and getattr(m, "version", 0) < MODEL_VERSION:
         raise ValueError("이 모델은 특징 계산이 고쳐지기 전 코드로 학습되었습니다 "
                          "(트랙 시작 구간을 정지로 세던 버그). 정답 표로 다시 학습해주세요.")
@@ -801,10 +800,10 @@ def snap_index(tr: Track) -> np.ndarray:
     return np.array(idx, dtype=int)
 
 
-def snap_truth(tr: Track, i: int, rules: bool = True) -> str:
+def snap_truth(tr: Track, i: int) -> str:
     """i번째 프레임의 학습용 정답 (정의 조건을 아직 못 채웠으면 판단 중)"""
     lab = tr.truth_situation[i]
-    if rules and lab != UNDECIDED and rule_violations(lab, tr.sfeat[i], False):
+    if lab != UNDECIDED and rule_violations(lab, tr.sfeat[i], False):
         return UNDECIDED
     return lab
 
@@ -814,14 +813,14 @@ def final_ok(tr: Track) -> list[str]:
     return rule_violations(tr.truth_final, tr.final_feat, True)
 
 
-def _snapshots(tr: Track, rules: bool = True, final: bool = True):
+def _snapshots(tr: Track, final: bool = True):
     """상황 트리 학습용: 0.5초마다 하나 + 사라진 시점 (3배 가중).
-    rules=True면 정의 조건(RULES)을 아직 못 채운 순간의 정답은 '판단 중'으로 바꾼다
+    정의 조건(RULES)을 아직 못 채운 순간의 정답은 '판단 중'으로 바꾼다
     (예: 반복 접근인데 아직 한 번밖에 안 나타남). 최종 정답이 조건에 안 맞으면 최종 샘플은 넣지 않는다."""
     idx = snap_index(tr)
     X = [tr.sfeat[i] for i in idx]
-    y = [snap_truth(tr, i, rules) for i in idx]
-    if final and not (rules and final_ok(tr)):
+    y = [snap_truth(tr, i) for i in idx]
+    if final and not final_ok(tr):
         for _ in range(3):
             X.append(tr.final_feat)
             y.append(tr.truth_final)
@@ -1042,6 +1041,17 @@ def rules_text() -> str:
                      for name, only_final, desc, _ in RULES)
 
 
+def places_text() -> str:
+    """문·외곽을 어떻게 판단하는지 (보고서·화면 표시용, 지금 설정값으로)"""
+    over = ", ".join(f"{w} > {', '.join(sorted(l))}" for w, l in PRIORITY_OVERRIDES.items())
+    return (f"문에서 나옴: 레이더 {DOOR_ENTER_R:g}m 안에서 처음 잡힘, 또는 {DOOR_EXIT_R:g}m 안에서 처음 잡힌 뒤 "
+            f"{DOOR_EXIT_WIN_S:g}초 동안 {DOOR_EXIT_MIN_MOVE:g}m 이상 움직였고 그중 {DOOR_EXIT_RADIAL:.0%} 이상이 "
+            f"레이더에서 곧장 멀어지는 방향\n"
+            f"문으로 사라짐: 레이더 {DOOR_ENTER_R:g}m 안에서 사라짐\n"
+            f"외곽: 측정 영역 좌우·먼 쪽 끝, 시야각 끝에서 {EDGE_MARGIN:g}m 안\n"
+            f"최종 판정: 이상 행동 1순위, 정상 행동 2순위, 같은 순위면 확률이 높은 것. 예외: {over}")
+
+
 def _pick(proba: np.ndarray, classes, feat: np.ndarray, final: bool):
     """조건을 지키는 상황 중 확률이 가장 높은 것 (없으면 판단 중).
     사람이 실제로 사라진 최종 판정에서는 '판단 중'보다 조건을 지키는 실제 상황을 고른다."""
@@ -1079,8 +1089,6 @@ def _sustained(tr: Track, hold_s: float = CAMERA_HOLD_S, min_prob: float = CAMER
             run_s, run_kind, run_max = 0.0, None, 0.0
     return out
 
-
-NORMAL_FROM_PROGRESS = True   # 정상 행동도 진행 중 1초 넘게 이어진 것을 후보로 (끝날 때 정의 조건은 지켜야 함)
 
 # 우선순위 예외: 한 사람에게 왼쪽 행동이 후보로 있으면 오른쪽 행동들은 후보에서 뺀다.
 #   외출 > 장시간 체류: 집에서 나와 엘리베이터를 기다리느라 오래 서 있을 수 있음
@@ -1180,7 +1188,7 @@ def predict(tracks: list[Track], models: Models) -> list[Track]:
         # 후보: (확률, 끝날 때 판정과 같은지, 이어진 시간). 정상 행동은 끝날 때 정의 조건을 지키는 것만
         cands = {}
         for k, v in sus.items():
-            if k in ABNORMAL or (NORMAL_FROM_PROGRESS and not rule_violations(k, tr.final_feat, True)):
+            if k in ABNORMAL or not rule_violations(k, tr.final_feat, True):
                 cands[k] = (v["prob"], k == tr.end_pred, v["dur"])
         if tr.end_pred != UNDECIDED and (tr.end_pred not in ABNORMAL or tr.end_prob >= CAMERA_PROB
                                          or not cands):

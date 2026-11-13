@@ -475,8 +475,6 @@ class Viewer(ttk.Frame):
                 if raw is None:                       # 처음 한 번만 파일을 읽음
                     rows = src["rows"] if src["rows"] is not None else C.load_rows(src["path"])
                     raw = C.tracks_from_rows(rows)
-                    for tr in raw:
-                        tr.file = src["name"]
                 # 판정은 복사본에 (모델을 바꿔도 원본 트랙은 그대로 두고 다시 판정)
                 tracks = C.analyze([copy.copy(tr) for tr in raw], models)
                 self._q.put((owner, i, gen, raw, tracks, None))

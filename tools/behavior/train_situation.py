@@ -130,7 +130,7 @@ class TrainResult:
     base: Path = None      # 정답 표 폴더 (파일 경로 기준)
 
 
-def evaluate(trs: list, models, tree) -> tuple[list, dict, list]:
+def evaluate(trs: list, models) -> tuple[list, dict, list]:
     """트랙들을 판정해서 (표 행, 요약, 글 줄)을 돌려준다."""
     C.predict(trs, models)          # 학습 때 이미 잇기·특징 계산을 마친 트랙에 판정만
     rows, lines = [], []
@@ -289,6 +289,7 @@ def train(labels_path: Path, out_path: Path = DEFAULT_OUT, region="auto", max_r:
              f"상황 트리 깊이 {depth}, 최종 판정 트리 깊이 {final_depth}, 잎 최소 샘플 {min_leaf}",
              "상황 정의 조건 (트리가 골라도 이 조건을 어기면 다음으로 확률 높은 상황을 고름, 학습 정답에도 적용):",
              C.rules_text(),
+             C.places_text(),
              f"학습 트랙 {len(train_trs)}개, 학습 샘플 {len(X)}개 (실제 {n_real}개)",
              "학습 샘플 정답 분포: " + ", ".join(f"{k} {v}" for k, v in Counter(y[:n_real]).items()), ""]
     if n_first_repeat:
@@ -304,7 +305,7 @@ def train(labels_path: Path, out_path: Path = DEFAULT_OUT, region="auto", max_r:
                              ("train", train_trs, "학습 데이터에 다시 돌려본 결과 (참고용, 당연히 잘 나옴)")):
         if not trs or (name == "train" and not eval_train):
             continue
-        r_, s_, l_ = evaluate(trs, models, tree)
+        r_, s_, l_ = evaluate(trs, models)
         all_rows += r_
         summary[name] = s_
         lines += [f"[{title}]"] + l_ + [""]
