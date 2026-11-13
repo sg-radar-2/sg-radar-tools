@@ -34,14 +34,16 @@ DT = 1.0 / FPS
 PASS = "통과"
 RETURN = "귀가"
 GO_OUT = "외출"
-VISIT = "방문/배달"
+VISIT = "방문"
+DELIVERY = "배달"
 DWELL = "장시간 체류"
 LOITER = "배회"
 REPEAT = "반복 접근"
 DOORLOCK = "도어락 조작 시도"
 UNDECIDED = "판단 중"
 
-SITUATIONS = [PASS, RETURN, GO_OUT, VISIT, DWELL, LOITER, REPEAT, DOORLOCK]
+SITUATIONS = [PASS, RETURN, GO_OUT, VISIT, DELIVERY, DWELL, LOITER, REPEAT, DOORLOCK]
+ALIASES = {"배달/택배": DELIVERY, "택배": DELIVERY, "배달·택배": DELIVERY}   # 정답 표에서 같은 뜻으로 받는 이름
 IDLE_FAR = "멀리 서 있기"   # 학습용 '해당 없음' 예시 (정답은 끝까지 '판단 중')
 ABNORMAL = {DWELL, LOITER, REPEAT, DOORLOCK}
 
@@ -156,19 +158,29 @@ def episode(kind: str, rng: random.Random) -> list[Frame]:
         p.mark(t_dec, GO_OUT)
 
     elif kind == VISIT:
+        # 문에 다가와 벨을 누르고 기다리다가, 집 안으로 들어감 (문에서 사라짐)
         p = Path_(*_far_point(rng))
         p.walk_to(rng.uniform(-0.3, 0.3), rng.uniform(0.6, 1.0), walk())
+        t_stop = p.t
         p.stay(rng.uniform(0.5, 1.5))
-        p.stay(rng.uniform(1.0, 2.0), hand=True)        # 노크·벨
-        if rng.random() < 0.5:
-            p.stay(rng.uniform(1.0, 2.0), crouch=True)  # 택배 내려놓기
-        p.stay(rng.uniform(0.5, 3.0))
-        t_leave = p.t
+        p.stay(rng.uniform(1.0, 2.0), hand=True)        # 벨·노크
+        p.stay(rng.uniform(3.0, 28.0))                  # 문 열어주기를 기다림
+        p.walk_to(rng.uniform(-0.1, 0.1), rng.uniform(0.3, 0.4), 0.6)
+        p.mark(t_stop + 3, VISIT)
+
+    elif kind == DELIVERY:
+        # 문에 다가와 물건을 내려놓고 사진을 찍은 뒤 다시 나감
+        p = Path_(*_far_point(rng))
+        p.walk_to(rng.uniform(-0.3, 0.3), rng.uniform(0.6, 1.0), walk())
+        t_stop = p.t
+        if rng.random() < 0.7:
+            p.stay(rng.uniform(1.0, 2.0), crouch=True)  # 내려놓기
+        p.stay(rng.uniform(2.0, 6.0), hand=rng.random() < 0.5)   # 사진 찍기
         if rng.random() < 0.6:
             p.walk_to(*_far_point(rng), walk())
         else:
             p.walk_to(*_side_exit(rng, p.y + 0.3), walk())
-        p.mark(t_leave + 1.5, VISIT)
+        p.mark(t_stop + 3, DELIVERY)
 
     elif kind == DWELL:
         p = Path_(*_far_point(rng))
@@ -193,15 +205,16 @@ def episode(kind: str, rng: random.Random) -> list[Frame]:
         p.mark(t_start + 20, LOITER)
 
     elif kind == REPEAT:
-        p = Path_(*_far_point(rng))
+        # 외곽에서 나타났다가 (레이더 밖으로) 사라지기를 반복. 두 번째로 나타날 때부터 반복 접근
+        p = Path_(*_far_point(rng, (6.3, 7.0)))
         t_dec = None
         for k in range(rng.choice([3, 3, 4])):
-            p.walk_to(rng.uniform(-0.4, 0.4), rng.uniform(0.5, 1.1), walk())
+            p.walk_to(rng.uniform(-0.6, 0.6), rng.uniform(0.6, 1.6), walk())
             p.stay(rng.uniform(0.0, 1.5))
-            if k == 1:
+            p.walk_to(*_far_point(rng, (6.3, 7.0)), walk())
+            if k == 0:
                 t_dec = p.t
-            p.walk_to(*_far_point(rng, (2.6, 5.5)), walk())
-            p.stay(rng.uniform(0.5, 3.0))
+            p.stay(rng.uniform(1.0, 4.0))
         p.mark(t_dec, REPEAT)
 
     elif kind == DOORLOCK:
@@ -267,9 +280,13 @@ def sense(frames: list[Frame], rng: random.Random, target_id: int, t_offset: flo
     tid = target_id
     switch_t = frames[len(frames) // 2].t if id_switch and len(frames) > 200 else None
     gap_until = -1.0
+    last_vis = None
     for i, f in enumerate(frames):
         if not visible(f.x, f.y):
             continue
+        if last_vis is not None and f.t - last_vis > 0.5:   # 레이더 밖에 나갔다 다시 들어오면 새 ID
+            tid += 1000
+        last_vis = f.t
         if switch_t is not None and f.t >= switch_t:
             gap_until, switch_t, tid = f.t + rng.uniform(0.3, 1.0), None, target_id + 100
         if f.t < gap_until:
@@ -341,8 +358,15 @@ def training_episodes(n_per_kind: int = 30, seed: int = 0) -> list[tuple[str, li
             final = UNDECIDED if kind == IDLE_FAR else kind
             rows = sense(fr, rng, target_id=1, id_switch=False, final=final)
             if len(rows) > 20:
-                out.append((f"{kind} #{k + 1}", rows))
+                # 멀리 서 있는 사람은 녹화 끝까지 그대로 있음. 나머지는 사라진 뒤 녹화가 조금 더 이어짐
+                out.append((f"{kind} #{k + 1}", rows if kind == IDLE_FAR else rows + [end_marker(rows)]))
     return out
+
+
+def end_marker(rows: list[dict], after_s: float = 2.0) -> dict:
+    """사람이 사라진 뒤에도 녹화가 조금 더 이어진 것처럼 하는 빈 행 (포인트 0개라 트랙으로는 안 씀)"""
+    return {"time_s": rows[-1]["time_s"] + after_s, "target_id": -1, "x": 0.0, "y": 0.0, "status": 0,
+            "n_points": 0, "doppler_mean": 0.0, "doppler_abs_mean": 0.0, "doppler_std": 0.0}
 
 
 def demo_sessions(seed: int = 7) -> list[dict]:
