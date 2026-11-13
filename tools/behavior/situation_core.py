@@ -78,6 +78,11 @@ STOP_SPEED = 0.35        # 사라지기 직전 1초 동안 이보다 느렸으�
 AWAY_R = 1.2             # 문에서 이 거리 밖에서 멈춰 있으면 '문에서 떨어져 정지' (엘리베이터 대기 등)
 SIDE_CHANGE_DX = 1.0     # 처음 잡힌 곳과 x 부호가 반대이고 이만큼 옆으로 갔으면 '문 반대편으로 건너감' (통과)
 OUT_MAX_APPROACH = 0.4   # 외출: 처음 잡힌 곳보다 이 이상 문에 가까워지면 외출이 아님
+# 배회: 측정 영역 안에 이 시간 이상 있었고 (멈춘 시간 포함)
+LOITER_MIN_S = 15.0
+# 장시간 체류와 구분: 그동안 절반 이상은 움직였고, 이만큼 이상 걸어 다녀야 배회 (서 있기만 하면 체류)
+LOITER_MIN_MOVE_FRAC = 0.3
+LOITER_MIN_PATH = 5.0
 # '문에서 나옴' 판단. 레이더는 사람이 문에서 나와 1~2걸음 걸은 뒤에야 트랙을 만들어서(실제 녹화: 1.1~1.7m)
 # 거리만으로는 문에서 나온 사람을 못 알아봄 → 처음 잡힌 뒤 짧은 시간 동안 레이더에서 곧장 멀어지면 문에서 나온 것
 DOOR_EXIT_R = 1.75       # 처음 잡힌 곳이 이 거리 안이고
@@ -801,10 +806,11 @@ def snap_index(tr: Track) -> np.ndarray:
 
 
 def snap_truth(tr: Track, i: int) -> str:
-    """i번째 프레임의 학습용 정답 (정의 조건을 아직 못 채웠으면 판단 중)"""
+    """i번째 프레임의 학습용 정답. 정의 조건을 어기면 조건을 지키는 가장 비슷한 상황(assign_fallback),
+    아직 그걸 안 정했으면 판단 중"""
     lab = tr.truth_situation[i]
     if lab != UNDECIDED and rule_violations(lab, tr.sfeat[i], False):
-        return UNDECIDED
+        return getattr(tr, "fallback", {}).get(i, UNDECIDED)
     return lab
 
 
@@ -813,17 +819,73 @@ def final_ok(tr: Track) -> list[str]:
     return rule_violations(tr.truth_final, tr.final_feat, True)
 
 
+def final_truth(tr: Track) -> str:
+    """학습·평가에 쓰는 최종 정답: 정답이 정의 조건에 맞으면 그대로, 안 맞으면 가장 비슷한 상황
+    (못 정했으면 None = 최종 샘플을 안 씀)"""
+    if not final_ok(tr):
+        return tr.truth_final
+    return getattr(tr, "final_fallback", None)
+
+
+def _similar(proba: np.ndarray, classes, feat: np.ndarray, final: bool, orig: str):
+    """정답(orig)이 조건에 안 맞을 때: 조건을 지키는 상황 중 트리 확률이 가장 높은 것 ('판단 중' 제외)"""
+    for k in np.argsort(-proba):
+        c = str(classes[k])
+        if proba[k] <= 0:
+            break
+        if c not in (UNDECIDED, orig) and not rule_violations(c, feat, final):
+            return c
+    return None
+
+
+def relabel_tree(people: list[Track], depth: int, min_leaf: int):
+    """조건을 지키는 정답만으로 임시 상황 트리를 학습한다 ('가장 비슷한 상황'을 고르는 데 씀)"""
+    from sklearn.tree import DecisionTreeClassifier
+    X, y = [], []
+    for p in people:
+        for i in snap_index(p):
+            lab = p.truth_situation[i]
+            if lab == UNDECIDED or not rule_violations(lab, p.sfeat[i], False):
+                X.append(p.sfeat[i])
+                y.append(lab)
+        if not final_ok(p):
+            X.append(p.final_feat)
+            y.append(p.truth_final)
+    tree = DecisionTreeClassifier(max_depth=depth, min_samples_leaf=min_leaf,
+                                  class_weight="balanced", random_state=0)
+    tree.fit(np.array(X), y)
+    return tree
+
+
+def assign_fallback(trs: list[Track], tree) -> None:
+    """정답이 정의 조건에 안 맞는 순간마다 대신 쓸 정답을 정한다.
+    tr.fallback = {프레임: 상황}, tr.final_fallback = 사라진 시점 상황 (못 정하면 None)"""
+    for tr in trs:
+        tr.fallback, tr.final_fallback = {}, None
+        idx = [i for i in snap_index(tr) if tr.truth_situation[i] != UNDECIDED
+               and rule_violations(tr.truth_situation[i], tr.sfeat[i], False)]
+        if idx:
+            for i, pr in zip(idx, tree.predict_proba(tr.sfeat[idx])):
+                alt = _similar(pr, tree.classes_, tr.sfeat[i], False, tr.truth_situation[i])
+                if alt:
+                    tr.fallback[i] = alt
+        if final_ok(tr):
+            pr = tree.predict_proba(tr.final_feat[None, :])[0]
+            tr.final_fallback = _similar(pr, tree.classes_, tr.final_feat, True, tr.truth_final)
+
+
 def _snapshots(tr: Track, final: bool = True):
     """상황 트리 학습용: 0.5초마다 하나 + 사라진 시점 (3배 가중).
-    정의 조건(RULES)을 아직 못 채운 순간의 정답은 '판단 중'으로 바꾼다
-    (예: 반복 접근인데 아직 한 번밖에 안 나타남). 최종 정답이 조건에 안 맞으면 최종 샘플은 넣지 않는다."""
+    정의 조건(RULES)을 어기는 순간의 정답은 조건을 지키는 가장 비슷한 상황으로 바꾼다 (assign_fallback).
+    최종 정답이 조건에 안 맞고 비슷한 상황도 못 정했으면 최종 샘플은 넣지 않는다."""
     idx = snap_index(tr)
     X = [tr.sfeat[i] for i in idx]
     y = [snap_truth(tr, i) for i in idx]
-    if final and not final_ok(tr):
+    truth = final_truth(tr)
+    if final and truth:
         for _ in range(3):
             X.append(tr.final_feat)
-            y.append(tr.truth_final)
+            y.append(truth)
     return X, y
 
 
@@ -838,9 +900,10 @@ def final_samples(tr: Track, rep: int = FINAL_REP):
         if lab != UNDECIDED:
             X.append(tr.sfeat[i])
             y.append(lab)
-    if not final_ok(tr):
+    truth = final_truth(tr)
+    if truth:
         X += [tr.final_feat] * rep
-        y += [tr.truth_final] * rep
+        y += [truth] * rep
     return X, y
 
 
@@ -877,14 +940,17 @@ def _fit(episodes: list[list[Track]]):
     for ep in episodes:
         for p in assemble(ep, region, motion_tree)[0]:
             p.truth_final = ep[0].truth_final
-            X, y = _snapshots(p)
-            sX += X
-            sy += y
             people.append(p)
+    rt = relabel_tree(people, 10, 10)
+    assign_fallback(people, rt)
+    for p in people:
+        X, y = _snapshots(p)
+        sX += X
+        sy += y
     sit_tree = DecisionTreeClassifier(max_depth=10, min_samples_leaf=10,
                                       class_weight="balanced", random_state=0)
     sit_tree.fit(np.array(sX), sy)
-    return motion_tree, sit_tree, fit_final(people, 6, 10)
+    return motion_tree, sit_tree, fit_final(people, 6, 10), rt
 
 
 def train(n_per_kind: int = 30, seed: int = 0, on_status=None) -> Models:
@@ -903,7 +969,7 @@ def train(n_per_kind: int = 30, seed: int = 0, on_status=None) -> Models:
     test_trs = [ep for k, ep in enumerate(episodes) if k % 4 == 0]
 
     say("결정 트리 학습 중 (검증용)...")
-    mt, st, ft = _fit(train_trs)
+    mt, st, ft, rt = _fit(train_trs)
     # 검증
     m_true, m_pred, s_true, s_pred, f_true, f_pred = [], [], [], [], [], []
     region = Region(**SIM_REGION)
@@ -915,6 +981,7 @@ def train(n_per_kind: int = 30, seed: int = 0, on_status=None) -> Models:
         for tr in people:
             tr.truth_final = ep[0].truth_final
             tr.out_of_range = False
+        assign_fallback(people, rt)            # 검증 정답도 학습 때와 같은 방식으로 바꿈
         predict(people, vm)                    # 정의 조건까지 적용한 판정으로 검증
         for tr in people:
             ok = tr._motion_ok & ~tr.hidden
@@ -923,14 +990,14 @@ def train(n_per_kind: int = 30, seed: int = 0, on_status=None) -> Models:
             idx = snap_index(tr)
             s_true += [snap_truth(tr, i) for i in idx]
             s_pred += [str(tr.sit_pred[i]) for i in idx]
-            if final_ok(tr):                   # 정답이 정의에 안 맞는 경우(반복 접근의 첫 등장 등)는 최종 검증에서 뺌
+            if not final_truth(tr):            # 정답이 정의에 안 맞고 비슷한 상황도 못 정한 경우는 최종 검증에서 뺌
                 continue
-            f_true.append(tr.truth_final)
+            f_true.append(final_truth(tr))
             f_pred.append(tr.final_pred)
     acc = lambda a, b: np.mean(np.array(a) == np.array(b)) if a else 0.0  # noqa: E731
 
     say("결정 트리 학습 중 (전체)...")
-    mt, st, ft = _fit(episodes)
+    mt, st, ft, _ = _fit(episodes)
 
     labels = SITUATIONS + [UNDECIDED]
     cm = confusion_matrix(f_true, f_pred, labels=labels)
@@ -1026,6 +1093,12 @@ RULES = [
     ("외출", True, "문으로 사라지면 외출 아님", lambda f: f["ended_at_door"] < 0.5),
     ("통과", True, "문으로 사라지면 통과 아님", lambda f: f["ended_at_door"] < 0.5),
     ("반복 접근", False, f"최근 {int(ENTRY_WINDOW_S)}초 안에 2번 이상 나타나야 함", lambda f: f["edge_entries"] >= 2),
+    ("배회", False, f"범위 안에 {int(LOITER_MIN_S)}초 이상 있어야 함 (멈춘 시간 포함)",
+     lambda f: f["elapsed"] >= LOITER_MIN_S),
+    ("배회", False, f"그동안 {int(LOITER_MIN_MOVE_FRAC * 100)}% 이상 움직여야 함 (서 있기만 하면 장시간 체류)",
+     lambda f: f["moving_s"] >= LOITER_MIN_MOVE_FRAC * f["elapsed"]),
+    ("배회", False, f"{LOITER_MIN_PATH:g}m 이상 걸어 다녀야 함",
+     lambda f: f["path_len"] >= LOITER_MIN_PATH),
 ]
 
 
