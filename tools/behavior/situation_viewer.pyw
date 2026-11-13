@@ -210,16 +210,21 @@ class Viewer(ttk.Frame):
         self.summary_var = tk.StringVar()
         ttk.Label(res, textvariable=self.summary_var, font=(UI_FONT[0], 11, "bold"),
                   justify="left").pack(anchor="w", pady=(0, 6))
-        cols = ("session", "track", "truth", "pred", "prob", "ok", "camera", "cam_ok")
-        heads = ("파일 · 세션", "트랙", "정답 (최종)", "판정 (최종)", "확률", "판정", "카메라 촬영", "촬영")
+        cols = ("session", "verdict", "track", "truth", "pred", "prob", "ok", "behaviors", "camera", "cam_ok")
+        heads = ("파일 · 세션", "녹화 판정", "사람(트랙)", "정답 (최종)", "판정 (최종)", "확률", "판정",
+                 "나온 행동 (이상 먼저)", "카메라 촬영", "촬영")
         self.result = ttk.Treeview(res, columns=cols, show="headings", height=18)
-        for c, h, w in zip(cols, heads, (220, 70, 130, 130, 60, 60, 260, 70)):
+        for c, h, w in zip(cols, heads, (200, 130, 90, 110, 110, 55, 50, 230, 200, 55)):
             self.result.heading(c, text=h)
-            self.result.column(c, width=w, anchor="w" if c in ("session", "camera") else "center")
+            self.result.column(c, width=w, anchor="w" if c in ("session", "camera", "behaviors", "verdict")
+                               else "center")
         self.result.pack(fill="both", expand=True)
         self.result.bind("<Double-1>", self._open_from_result)
         ttk.Label(res, foreground="#666", justify="left", text=(
-            "판정: 사라진 시점에 상황 트리가 내린 최종 판정이 정답과 같은지\n"
+            "최종 판정: 이상 행동 1순위(진행 중 60% 이상으로 1초 넘게 이어진 것), 없으면 정상 행동 중 확률이 "
+            "가장 높은 것 (끝날 때 정의 조건을 지키는 것만)\n"
+            "녹화 판정: 그 세션 사람들의 최종 판정 중 같은 우선순위로 하나 (세션 첫 줄에 표시)\n"
+            "판정: 최종 판정이 정답과 같은지\n"
             "촬영: 이상 상황이면 촬영했는지, 정상 상황이면 촬영하지 않았는지 (정답이 있는 데이터만)\n"
             "행을 더블클릭하면 그 세션을 재생합니다. 여러 파일을 열면 읽은 파일부터 차례로 채워집니다.")
                   ).pack(anchor="w", pady=(6, 0))
@@ -739,9 +744,19 @@ class Viewer(ttk.Frame):
             for k, v in obs:
                 tx.insert("end", f"  {k}\t", "k")
                 tx.insert("end", f"{v}\n")
+            if ended and not getattr(tr, "out_of_range", False):
+                beh = getattr(tr, "behaviors", [])
+                if beh:
+                    tx.insert("end", "  나온 행동\t", "k")
+                    tx.insert("end", ", ".join(
+                        f"{b['situation']} {b['prob']:.0%}" + ("(이상)" if b["abnormal"] else "")
+                        + ("(끝날 때)" if b["source"] == "끝날 때" else "") for b in beh) + "\n")
+                if getattr(tr, "end_pred", sit) != sit:
+                    tx.insert("end", "  끝날 때 판정\t", "k")
+                    tx.insert("end", f"{tr.end_pred} {tr.end_prob:.0%}\n")
             tag = "abnormal" if sit in S.ABNORMAL else "wait" if sit == S.UNDECIDED else "normal"
             kind = "이상" if tag == "abnormal" else "판단 중" if tag == "wait" else "정상"
-            tx.insert("end", "  상황 (최종 판정 트리)\t" if ended else "  상황 (결정 트리)\t", "k")
+            tx.insert("end", "  최종 판정 (이상 우선)\t" if ended else "  상황 (결정 트리)\t", "k")
             tx.insert("end", f"{sit}  {prob:.0%}  [{kind}]\n", tag)
             tx.insert("end", "  근거 (트리가 지나온 질문)\n", "k")
             for w in why:
@@ -760,8 +775,21 @@ class Viewer(ttk.Frame):
                 multi = len({tr.session for tr in src["tracks"]}) > 1
                 for tr in src["tracks"]:
                     all_tracks.append((si, f"{src['name']} · {tr.session}" if multi else src["name"], tr))
+        verdicts, shown = {}, set()
+        for si, label, tr in all_tracks:
+            verdicts.setdefault((si, tr.session), []).append(tr)
+        verdicts = {k: C.recording_verdict(v) for k, v in verdicts.items()}
         for si, label, tr in all_tracks:
             truth = tr.truth_final or "-"
+            vkey = (si, tr.session)
+            if vkey in shown:
+                vtxt = ""
+            else:
+                shown.add(vkey)
+                v, vp, _ = verdicts[vkey]
+                vtxt = f"{v} {vp:.0%}" + (" (이상)" if v in S.ABNORMAL else "")
+            beh = ", ".join(f"{b['situation']} {b['prob']:.0%}" + ("(끝)" if b["source"] == "끝날 때" else "")
+                            for b in getattr(tr, "behaviors", []))
             cams = ", ".join(f"{c['t'] - tr.t0:.1f}초 {c['situation']}" for c in tr.cameras) or "-"
             if tr.truth_final:
                 n += 1
@@ -774,8 +802,8 @@ class Viewer(ttk.Frame):
                 mark, cmark = ("O" if good else "X"), ("O" if cam_good else "X")
             else:
                 mark = cmark = "-"
-            iid = self.result.insert("", "end", values=(label, C.track_name(tr), truth, tr.final_pred,
-                                                        f"{tr.final_prob:.0%}", mark, cams, cmark))
+            iid = self.result.insert("", "end", values=(label, vtxt, C.track_name(tr), truth, tr.final_pred,
+                                                        f"{tr.final_prob:.0%}", mark, beh or "-", cams, cmark))
             self._result_map[iid] = (si, tr.session)
         if n:
             self.summary_var.set(f"최종 판정 {ok}/{n} 맞음   ·   촬영 판단 {cam_ok}/{cam_n} 맞음 "

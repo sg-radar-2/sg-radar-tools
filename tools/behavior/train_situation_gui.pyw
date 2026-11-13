@@ -27,8 +27,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-RESULT_COLS = ("split", "file", "truth", "track", "dur", "pred", "prob", "ok", "why",
-               "progress", "camera", "file_cam")
+RESULT_COLS = ("split", "file", "file_verdict", "truth", "track", "dur", "pred", "prob", "ok", "why",
+               "behaviors", "end", "camera", "file_cam")
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
@@ -216,15 +216,17 @@ class TrainApp(ttk.Frame):
         ttk.Checkbutton(bar, text="틀린 것만", variable=self.only_bad,
                         command=self.fill_results).pack(side="right", padx=8)
         cols = RESULT_COLS
-        heads = ("구분", "파일", "정답", "트랙", "길이", "최종 판정", "확률", "판정", "근거 (틀린 것)",
-                 "진행 중 판정", "촬영", "파일 촬영 판단")
-        self.res_tree = self._table(rs, cols, heads, (50, 70, 90, 90, 55, 95, 50, 40, 330, 170, 150, 130),
-                                    pady=(6, 0))
+        heads = ("구분", "파일", "녹화 판정", "정답", "사람(트랙)", "길이", "최종 판정", "확률", "판정",
+                 "근거 (틀린 것)", "나온 행동 (이상 먼저)", "끝날 때 판정", "촬영", "파일 촬영 판단")
+        self.res_tree = self._table(rs, cols, heads,
+                                    (45, 65, 130, 85, 85, 50, 90, 45, 40, 300, 190, 95, 140, 120), pady=(6, 0))
         self.res_tree.tag_configure("good", foreground="#1b7f3b")
         self.res_tree.tag_configure("bad", foreground="#c0161b")
         self.res_tree.bind("<Double-1>", self.open_row)
         ttk.Label(rs, foreground="#666", justify="left", text=(
-            "판정: 사람이 사라진(또는 녹화가 끝난) 순간 최종 판정 트리의 판정이 정답과 같은지 (O/X)\n"
+            "최종 판정: 이상 행동이 1순위(진행 중 60% 이상으로 1초 넘게 이어진 이상 행동, 끝날 때 판정 포함), "
+            "없으면 끝날 때 판정(정상 행동). 같은 순위면 확률이 높은 것. 판정 = 최종 판정이 정답과 같은지 (O/X)\n"
+            "녹화 판정: 그 녹화의 사람들 최종 판정 중 같은 우선순위로 하나 (녹화 첫 줄에 표시)\n"
             "근거: 정의 조건 때문에 판정이 바뀌었으면 그 내용, 아니면 최종 판정 트리가 지나온 질문 (앞 3개)\n"
             "파일 촬영 판단: 이상 상황 녹화면 촬영했어야 맞고, 정상 상황이면 촬영하지 않아야 맞음\n"
             "줄을 더블클릭하면 그 녹화를 뷰어에서 엽니다.")
@@ -247,8 +249,8 @@ class TrainApp(ttk.Frame):
         tv = ttk.Treeview(box, columns=cols, show="headings")
         for c, h, w in zip(cols, heads, widths):
             tv.heading(c, text=h)
-            tv.column(c, width=w, anchor="w" if c in ("progress", "camera", "file_cam", "state", "why")
-                      else "center")
+            tv.column(c, width=w, anchor="w" if c in ("progress", "camera", "file_cam", "state", "why",
+                                                       "behaviors", "file_verdict") else "center")
         ys = ttk.Scrollbar(box, orient="vertical", command=tv.yview)
         tv.configure(yscrollcommand=ys.set)
         ys.pack(side="right", fill="y")
@@ -501,18 +503,22 @@ class TrainApp(ttk.Frame):
             k = len(res.folds)
             accs = []
             for i in range(k):
+                (ro, rn) = res.summary[f"{i + 1}번"]["recordings"]
                 (to, tn) = res.summary[f"{i + 1}번"]["tracks"]
-                accs.append(f"{i + 1}번 {to}/{tn}")
-            (to, tn), (fo, fn), (so, sn) = (res.summary["전체"][key] for key in ("tracks", "files", "snapshots"))
-            txt.append(f"[{k}겹 교차 검증, 모든 녹화가 한 번씩 test] 트랙 최종 판정 {to}/{tn} = {to / max(tn, 1):.0%}  ·  "
+                accs.append(f"{i + 1}번 녹화 {ro}/{rn}·사람 {to}/{tn}")
+            (ro, rn), (to, tn), (fo, fn), (so, sn) = (res.summary["전체"][key] for key in
+                                                      ("recordings", "tracks", "files", "snapshots"))
+            txt.append(f"[{k}겹 교차 검증, 모든 녹화가 한 번씩 test] 녹화 판정 {ro}/{rn} = {ro / max(rn, 1):.0%}  ·  "
+                       f"사람별 최종 판정 {to}/{tn} = {to / max(tn, 1):.0%}  ·  "
                        f"파일 촬영 판단 {fo}/{fn}  ·  0.5초 판정 {so / max(sn, 1):.0%}")
-            txt.append("폴드별 트랙: " + ",  ".join(accs) + "   (상황별 정답률·혼동 행렬은 '결정 트리' 탭)")
+            txt.append("폴드별: " + ",  ".join(accs) + "   (상황별 정답률·혼동 행렬은 '결정 트리' 탭)")
         for name, title in (("test", "test"), ("train", "train(참고)")):
             s = res.summary.get(name)
             if s:
                 (to, tn), (fo, fn), (so, sn) = s["tracks"], s["files"], s["snapshots"]
-                txt.append(f"[{title}] 트랙 최종 판정 {to}/{tn}  ·  파일 촬영 판단 {fo}/{fn}  ·  "
-                           f"0.5초 판정 {so / max(sn, 1):.0%}")
+                ro, rn = s.get("recordings", (0, 0))
+                txt.append(f"[{title}] 녹화 판정 {ro}/{rn}  ·  사람별 최종 판정 {to}/{tn}  ·  "
+                           f"파일 촬영 판단 {fo}/{fn}  ·  0.5초 판정 {so / max(sn, 1):.0%}")
         if "test" not in res.summary and not getattr(res, "cv", False):
             txt.append("※ split이 test인 녹화가 없어서 진짜 성능은 확인할 수 없습니다.")
         if res.warnings:

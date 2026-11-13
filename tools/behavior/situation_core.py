@@ -76,7 +76,7 @@ ENTRY_WINDOW_S = 60.0    # 최근 이 시간 동안 외곽에서 들어온 횟�
 STOP_SPEED = 0.35        # 사라지기 직전 1초 동안 이보다 느렸으면 '멈춰서 놓친 것' (빠르면 그냥 트래킹 실패)
 AWAY_R = 1.2             # 문에서 이 거리 밖에서 멈춰 있으면 '문에서 떨어져 정지' (엘리베이터 대기 등)
 SIDE_CHANGE_DX = 1.0     # 처음 잡힌 곳과 x 부호가 반대이고 이만큼 옆으로 갔으면 '문 반대편으로 건너감' (통과)
-OUT_MAX_APPROACH = 0.5   # 외출: 처음 잡힌 곳보다 이 이상 문에 가까워지면 외출이 아님
+OUT_MAX_APPROACH = 0.4   # 외출: 처음 잡힌 곳보다 이 이상 문에 가까워지면 외출이 아님
 # '문에서 나옴' 판단. 레이더는 사람이 문에서 나와 1~2걸음 걸은 뒤에야 트랙을 만들어서(실제 녹화: 1.1~1.7m)
 # 거리만으로는 문에서 나온 사람을 못 알아봄 → 처음 잡힌 뒤 짧은 시간 동안 레이더에서 곧장 멀어지면 문에서 나온 것
 DOOR_EXIT_R = 1.75       # 처음 잡힌 곳이 이 거리 안이고
@@ -1021,7 +1021,7 @@ RULES = [
     ("귀가", True, "문으로 사라져야 함", _at_door_end),
     ("방문", True, "문으로 사라져야 함 (집 안으로 들어감)", _at_door_end),
     ("배달", True, "외곽(구역 바깥)으로 나가야 함", _at_edge_end),
-    ("외출", False, "문에서 나온 사람이어야 함", lambda f: f["appear_door"] >= 0.5),
+    ("외출", False, "문에서 나온 사람이어야 함", lambda f: f["appear_door"] >= 0.6),
     ("외출", False, f"처음 잡힌 곳보다 문에 {OUT_MAX_APPROACH}m 이상 다가가면 외출 아님",
      lambda f: f["approach_depth"] < OUT_MAX_APPROACH),
     ("외출", True, "문으로 사라지면 외출 아님", lambda f: f["ended_at_door"] < 0.5),
@@ -1057,14 +1057,61 @@ def _pick(proba: np.ndarray, classes, feat: np.ndarray, final: bool):
     return UNDECIDED, 0.0
 
 
+def _sustained(tr: Track, hold_s: float = CAMERA_HOLD_S, min_prob: float = CAMERA_PROB) -> dict:
+    """진행 중 판정에서 같은 상황이 min_prob 이상으로 hold_s 이상 이어진 구간들.
+    {상황: {"prob": 그 구간들 중 최고 확률, "t": 처음 hold_s를 채운 시각(절대), "dur": 가장 긴 구간 길이}}"""
+    out: dict = {}
+    run_s, run_kind, run_max = 0.0, None, 0.0
+    for i in range(len(tr.t)):
+        kind = str(tr.sit_pred[i])
+        dt = min(tr.t[i] - tr.t[i - 1], 0.5) if i else 0.0
+        if kind != UNDECIDED and tr.sit_prob[i] >= min_prob:
+            if kind == run_kind:
+                run_s += dt
+                run_max = max(run_max, float(tr.sit_prob[i]))
+            else:
+                run_s, run_kind, run_max = 0.0, kind, float(tr.sit_prob[i])
+            if run_s >= hold_s:
+                b = out.setdefault(kind, {"prob": 0.0, "t": float(tr.t_abs[i]), "dur": 0.0})
+                b["prob"] = max(b["prob"], run_max)
+                b["dur"] = max(b["dur"], run_s)
+        else:
+            run_s, run_kind, run_max = 0.0, None, 0.0
+    return out
+
+
+NORMAL_FROM_PROGRESS = True   # 정상 행동도 진행 중 1초 넘게 이어진 것을 후보로 (끝날 때 정의 조건은 지켜야 함)
+
+
+def priority_pick(cands: dict) -> tuple[str, float]:
+    """{상황: 확률 또는 (확률, 동점 기준...)}에서 우선순위대로 하나 고른다.
+    이상 행동이 1순위, 정상 행동이 2순위, 같은 순위 안에서는 확률이 높은 것
+    (확률이 같으면 튜플의 다음 값들: 끝날 때 판정과 같은지, 이어진 시간)."""
+    if not cands:
+        return UNDECIDED, 0.0
+    key = {k: (v if isinstance(v, tuple) else (v,)) for k, v in cands.items()}
+    key = {k: (round(v[0], 2),) + tuple(v[1:]) for k, v in key.items()}
+    abn = [k for k in key if k in ABNORMAL]
+    pool = abn or [k for k in key if k != UNDECIDED] or list(key)
+    best = max(pool, key=lambda k: key[k])
+    return best, float(key[best][0])
+
+
 def predict(tracks: list[Track], models: Models) -> list[Track]:
     """특징까지 계산된 트랙들에 상황 트리 판정과 카메라 촬영을 붙인다.
-    결정 트리 확률 중 RULES를 어기는 상황은 빼고 고른다."""
+    결정 트리 확률 중 RULES를 어기는 상황은 빼고 고른다.
+
+    최종 판정 (한 사람에게 여러 행동이 나올 수 있음):
+      후보 = 진행 중 CAMERA_PROB 이상으로 CAMERA_HOLD_S 넘게 이어진 이상 행동들 (최고 확률)
+           + 사라진(녹화가 끝난) 순간 최종 판정 트리의 판정
+      우선순위: 이상 행동이 하나라도 있으면 그중 확률이 가장 높은 것, 없으면 끝날 때 판정 (정상 행동)
+      정상 행동(귀가·방문·배달 등)은 어디로 사라졌는지가 있어야 알 수 있어서 끝날 때 판정으로 고른다."""
     for tr in tracks:
         if tr.out_of_range:     # 감시 범위 밖: 판정·촬영 안 함
             tr.sit_pred = np.array([UNDECIDED] * len(tr.t), dtype=object)
             tr.sit_prob = np.ones(len(tr.t))
             tr.final_pred, tr.final_prob, tr.cameras = UNDECIDED, 1.0, []
+            tr.end_pred, tr.end_prob, tr.behaviors, tr.rule_note = UNDECIDED, 1.0, [], ""
             continue
         proba = models.situation.predict_proba(tr.sfeat)
         classes = models.situation.classes_
@@ -1106,7 +1153,56 @@ def predict(tracks: list[Track], models: Models) -> list[Track]:
                 and tr.final_pred not in fired):
             tr.cameras.append({"t": float(tr.t_abs[-1]), "situation": tr.final_pred,
                                "prob": float(tr.final_prob), "final": True})
+
+        # ---- 최종 판정: 이상 행동 1순위, 정상 행동 2순위
+        tr.end_pred, tr.end_prob = tr.final_pred, tr.final_prob       # 끝날 때 판정 (최종 판정 트리)
+        sus = _sustained(tr)
+        # 후보: (확률, 끝날 때 판정과 같은지, 이어진 시간). 정상 행동은 끝날 때 정의 조건을 지키는 것만
+        cands = {}
+        for k, v in sus.items():
+            if k in ABNORMAL or (NORMAL_FROM_PROGRESS and not rule_violations(k, tr.final_feat, True)):
+                cands[k] = (v["prob"], k == tr.end_pred, v["dur"])
+        if tr.end_pred != UNDECIDED and (tr.end_pred not in ABNORMAL or tr.end_prob >= CAMERA_PROB
+                                         or not cands):
+            old = cands.get(tr.end_pred, (0.0, True, 0.0))
+            cands[tr.end_pred] = (max(old[0], tr.end_prob), True, old[2])
+        best, prob = priority_pick(cands)
+        if best != UNDECIDED:
+            tr.final_pred, tr.final_prob = best, prob
+        # 이 사람에게서 나온 행동들 (화면 표시용): 진행 중 1초 넘게 이어진 것 + 끝날 때 판정
+        tr.behaviors = []
+        for k, v in sorted(sus.items(), key=lambda kv: (kv[0] not in ABNORMAL, -kv[1]["prob"])):
+            tr.behaviors.append({"situation": k, "prob": v["prob"], "t": v["t"], "dur": v["dur"],
+                                 "source": "진행 중", "abnormal": k in ABNORMAL})
+        if tr.end_pred != UNDECIDED:
+            tr.behaviors.append({"situation": tr.end_pred, "prob": tr.end_prob, "t": float(tr.t_abs[-1]),
+                                 "dur": 0.0, "source": "끝날 때", "abnormal": tr.end_pred in ABNORMAL})
+        if tr.final_pred != tr.end_pred:
+            b = sus.get(tr.final_pred)
+            when = f" ({b['t'] - tr.t_abs[0]:.1f}초부터 {b['dur']:.1f}초 넘게)" if b else ""
+            why = ("이상 행동 우선" if tr.final_pred in ABNORMAL and tr.end_pred not in ABNORMAL
+                   else "확률이 더 높음")
+            note = (f"{why}: 진행 중 {tr.final_pred} {tr.final_prob:.0%}{when} "
+                    f"→ 끝날 때 판정 {tr.end_pred} {tr.end_prob:.0%} 대신")
+            tr.rule_note = note + (f" / 끝날 때 판정: {tr.rule_note}" if tr.rule_note else "")
     return tracks
+
+
+def recording_verdict(tracks: list[Track]) -> tuple[str, float, "Track | None"]:
+    """녹화(세션) 하나의 판정: 영역 안 사람들의 최종 판정 중 이상 행동 1순위, 정상 행동 2순위,
+    같은 순위면 확률이 높은 것. (판정, 확률, 그 사람)"""
+    people = [t for t in tracks if not getattr(t, "out_of_range", False)
+              and getattr(t, "final_pred", UNDECIDED) != UNDECIDED]
+    if not people:
+        return UNDECIDED, 0.0, None
+    cands: dict = {}
+    who: dict = {}
+    for t in people:
+        v = (t.final_prob, float(t.t[-1]))             # 확률이 같으면 오래 잡힌 사람
+        if t.final_pred not in cands or v > cands[t.final_pred]:
+            cands[t.final_pred], who[t.final_pred] = v, t
+    best, prob = priority_pick(cands)
+    return best, prob, who.get(best)
 
 
 def describe_path(tr: Track, region: "Region | None") -> str:

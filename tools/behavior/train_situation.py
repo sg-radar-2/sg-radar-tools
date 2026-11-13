@@ -142,23 +142,34 @@ def evaluate(trs: list, models, tree) -> tuple[list, dict, list]:
         truth = [C.snap_truth(tr, i) for i in idx]
         snap_ok += sum(str(tr.sit_pred[i]) == t for i, t in zip(idx, truth))
         snap_n += len(idx)
-    trk_ok = file_ok = 0
+    trk_ok = file_ok = rec_ok = 0
     for fname, ftrs in by_file.items():
-        truth = ftrs[0].truth_final
-        should = truth in S.ABNORMAL
+        truths = list(dict.fromkeys(tr.truth_final for tr in ftrs))
+        # 녹화 정답: 이상 행동이 있으면 그것(1순위), 없으면 정상 행동
+        expect = [t for t in truths if t in S.ABNORMAL] or truths
+        should = any(t in S.ABNORMAL for t in truths)
         fired = any(tr.cameras for tr in ftrs)
         cam_good = fired == should
         file_ok += cam_good
-        lines.append(f"  {fname}  (정답: {truth})")
+        verdict, vprob, _ = C.recording_verdict(ftrs)
+        rec_good = verdict in expect
+        rec_ok += rec_good
+        lines.append(f"  {fname}  (정답: {', '.join(truths)})  → 녹화 판정 {verdict} {vprob:.0%} "
+                     f"[{'O' if rec_good else 'X'}]")
         for k, tr in enumerate(ftrs):
+            truth = tr.truth_final
             good = tr.final_pred == truth
             trk_ok += good
             cams = ", ".join(f"{c['t'] - tr.t0:.1f}초 {c['situation']}" for c in tr.cameras) or "-"
             share = Counter(str(p) for p in tr.sit_pred).most_common(2)
             share_txt = ", ".join(f"{s_} {v / len(tr.t):.0%}" for s_, v in share)
             why = getattr(tr, "rule_note", "") or " / ".join(C.explain(models, tr.final_feat, "final")[:3])
+            beh = ", ".join(f"{b['situation']} {b['prob']:.0%}" + ("(끝)" if b["source"] == "끝날 때" else "")
+                            for b in getattr(tr, "behaviors", []))
             rows.append({
-                "why": why,
+                "why": why, "end": f"{tr.end_pred} {tr.end_prob:.0%}", "behaviors": beh,
+                "file_verdict": ("" if k else f"{verdict} {vprob:.0%} ({'맞음' if rec_good else '틀림'})"),
+                "file_ok": rec_good, "verdict": verdict, "rec_truth": "/".join(expect), "first": k == 0,
                 "split": tr.split, "file": fname, "truth": truth, "track": C.track_name(tr),
                 "dur": f"{tr.t[-1]:.1f}초", "pred": tr.final_pred, "prob": f"{tr.final_prob:.0%}",
                 "ok": "O" if good else "X", "progress": share_txt, "camera": cams,
@@ -166,15 +177,16 @@ def evaluate(trs: list, models, tree) -> tuple[list, dict, list]:
                                            f"({'맞음' if cam_good else '틀림'})")),
             })
             lines.append(f"    {C.track_name(tr):<8} {tr.t[-1]:5.1f}초  최종 {tr.final_pred} {tr.final_prob:.0%} "
-                         f"[{'O' if good else 'X'}]  / 진행 중 판정 {share_txt}  / 촬영 {cams}")
+                         f"[{'O' if good else 'X'}]  / 나온 행동 {beh or '-'}  / 촬영 {cams}")
             if not good:
                 lines.append(f"             근거: {why}")
         lines.append(f"    → 파일 단위 촬영: {'함' if fired else '안 함'} "
                      f"({'맞음' if cam_good else '틀림'}: "
                      f"{'이상이라 촬영해야 함' if should else '정상이라 촬영하면 안 됨'})")
     summary = {"tracks": (trk_ok, len(trs)), "files": (file_ok, len(by_file)),
-               "snapshots": (snap_ok, snap_n)}
-    lines.append(f"  트랙 최종 판정 {trk_ok}/{len(trs)}, 파일 촬영 판단 {file_ok}/{len(by_file)}, "
+               "snapshots": (snap_ok, snap_n), "recordings": (rec_ok, len(by_file))}
+    lines.append(f"  녹화 판정 {rec_ok}/{len(by_file)}, 트랙 최종 판정 {trk_ok}/{len(trs)}, "
+                 f"파일 촬영 판단 {file_ok}/{len(by_file)}, "
                  f"0.5초 스냅샷 정확도 {snap_ok}/{snap_n} = {snap_ok / max(snap_n, 1):.0%}")
     return rows, summary, lines
 
@@ -392,25 +404,30 @@ def cross_validate(labels_path: Path, out_path: Path, k: int = 5, seed: int = 0,
         for w in res.warnings or []:
             if w not in warnings:
                 warnings.append(w)
-        (to, tn), (fo, fn), (so, sn) = res.summary["test"]["tracks"], res.summary["test"]["files"], \
-            res.summary["test"]["snapshots"]
-        log(f"  → 폴드 {f + 1}: 트랙 최종 판정 {to}/{tn}, 파일 촬영 판단 {fo}/{fn}, 0.5초 판정 {so / max(sn, 1):.0%}"
-            f"  ({path.name})")
+        (ro, rn), (to, tn), (fo, fn), (so, sn) = (res.summary["test"][key] for key in
+                                                  ("recordings", "tracks", "files", "snapshots"))
+        log(f"  → 폴드 {f + 1}: 녹화 판정 {ro}/{rn}, 트랙 최종 판정 {to}/{tn}, 파일 촬영 판단 {fo}/{fn}, "
+            f"0.5초 판정 {so / max(sn, 1):.0%}  ({path.name})")
     tot = {key: tuple(sum(summary[n][key][i] for n in summary) for i in range(2))
-           for key in ("tracks", "files", "snapshots")}
+           for key in ("recordings", "tracks", "files", "snapshots")}
     summary["전체"] = tot
     acc = lambda p: f"{p[0]}/{p[1]} = {p[0] / max(p[1], 1):.0%}"  # noqa: E731
     lines += ["[폴드별 결과 (각 폴드의 test 녹화만)]"]
     for f in range(k):
         s = summary[f"{f + 1}번"]
-        lines.append(f"  {f + 1}번  트랙 {acc(s['tracks']):<14} 파일 촬영 {acc(s['files']):<14} "
-                     f"0.5초 판정 {acc(s['snapshots']):<16} {folds[f][0].name}")
-    lines.append(f"  전체 트랙 {acc(tot['tracks'])}, 파일 촬영 {acc(tot['files'])}, 0.5초 판정 {acc(tot['snapshots'])}")
-    tr_acc = [summary[f"{f + 1}번"]["tracks"][0] / max(summary[f"{f + 1}번"]["tracks"][1], 1) for f in range(k)]
-    lines.append(f"  폴드별 트랙 정확도 평균 {np.mean(tr_acc):.0%} ± {np.std(tr_acc):.0%} (표준편차)")
+        lines.append(f"  {f + 1}번  녹화 {acc(s['recordings']):<14} 트랙 {acc(s['tracks']):<14} "
+                     f"파일 촬영 {acc(s['files']):<14} 0.5초 판정 {acc(s['snapshots']):<16} {folds[f][0].name}")
+    lines.append(f"  전체 녹화 {acc(tot['recordings'])}, 트랙 {acc(tot['tracks'])}, 파일 촬영 {acc(tot['files'])}, "
+                 f"0.5초 판정 {acc(tot['snapshots'])}")
+    for key, title in (("recordings", "녹화"), ("tracks", "트랙")):
+        a = [summary[f"{f + 1}번"][key][0] / max(summary[f"{f + 1}번"][key][1], 1) for f in range(k)]
+        lines.append(f"  폴드별 {title} 정확도 평균 {np.mean(a):.0%} ± {np.std(a):.0%} (표준편차)")
+    lines += ["", "최종 판정 = 이상 행동 1순위(진행 중 60% 이상으로 1초 넘게 이어진 것 + 끝날 때 판정), "
+                  "없으면 끝날 때 판정(정상 행동). 같은 순위면 확률이 높은 것.",
+              "녹화 판정 = 그 녹화의 사람들 최종 판정 중 같은 우선순위로 하나."]
     # 상황별·혼동 행렬 (모든 녹화가 한 번씩 test가 됨)
     sits = [s for s in S.SITUATIONS + [S.UNDECIDED] if any(r["truth"] == s or r["pred"] == s for r in rows)]
-    lines += ["", "[상황별 정답률 (모든 녹화가 한 번씩 test)]"]
+    lines += ["", "[사람(트랙)별 상황 정답률 (모든 녹화가 한 번씩 test)]"]
     for s in sits:
         rs = [r for r in rows if r["truth"] == s]
         if rs:
@@ -422,12 +439,21 @@ def cross_validate(labels_path: Path, out_path: Path, k: int = 5, seed: int = 0,
     lines += ["", "[최종 판정 혼동 행렬] 행: 정답, 열: 판정", "          " + " ".join(f"{s[:4]:>6}" for s in sits)]
     for s, row in zip(sits, cm):
         lines.append(f"  {s[:6]:<8}" + " ".join(f"{v:>6d}" for v in row))
+    recs = [r for r in rows if r.get("first")]
+    lines += ["", f"[녹화 판정] {sum(r['file_ok'] for r in recs)}/{len(recs)}"]
+    for s in sits:
+        rs = [r for r in recs if r["rec_truth"] == s]
+        if rs:
+            ok = sum(r["file_ok"] for r in rs)
+            wrong = Counter(r["verdict"] for r in rs if not r["file_ok"])
+            lines.append(f"  {s:<8} {ok}/{len(rs)}" + (f"   틀린 것: {', '.join(f'{p} {n}' for p, n in wrong.items())}"
+                                                      if wrong else ""))
     bad = [r for r in rows if r["ok"] != "O"]
     if bad:
         lines += ["", f"[틀린 트랙 {len(bad)}개]"]
         for r in bad:
             lines.append(f"  {r['split']} {r['file']:<10} {r['track']:<10} 정답 {r['truth']} → {r['pred']} {r['prob']}"
-                         f"   근거: {r.get('why', '')}")
+                         f"   나온 행동: {r.get('behaviors') or '-'}   근거: {r.get('why', '')}")
     if warnings:
         lines += ["", "[정답이 상황 정의와 안 맞는 트랙] (사라진 시점 샘플은 학습에서 뺌)"] + ["  " + w for w in warnings]
     lines += ["", "각 폴드의 트리는 모델 파일마다 저장되어 있습니다 (뷰어에서 모델 열기 → 결정 트리 탭)."]
