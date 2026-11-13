@@ -1082,11 +1082,31 @@ def _sustained(tr: Track, hold_s: float = CAMERA_HOLD_S, min_prob: float = CAMER
 
 NORMAL_FROM_PROGRESS = True   # 정상 행동도 진행 중 1초 넘게 이어진 것을 후보로 (끝날 때 정의 조건은 지켜야 함)
 
+# 우선순위 예외: 한 사람에게 왼쪽 행동이 후보로 있으면 오른쪽 행동들은 후보에서 뺀다.
+#   외출 > 장시간 체류: 집에서 나와 엘리베이터를 기다리느라 오래 서 있을 수 있음
+#   (외출 후보는 '문에서 나옴' 등 외출 정의 조건을 지킨 경우에만 생김)
+PRIORITY_OVERRIDES = {
+    "외출": {"장시간 체류"},
+}
+
+
+def apply_overrides(cands: dict) -> tuple[dict, list[str]]:
+    """PRIORITY_OVERRIDES를 적용한 후보와 뺀 내용 설명"""
+    out, notes = dict(cands), []
+    for win, losers in PRIORITY_OVERRIDES.items():
+        if win in out:
+            for lose in losers:
+                if lose in out:
+                    del out[lose]
+                    notes.append(f"{win}이면 {lose}은 뺌")
+    return out, notes
+
 
 def priority_pick(cands: dict) -> tuple[str, float]:
     """{상황: 확률 또는 (확률, 동점 기준...)}에서 우선순위대로 하나 고른다.
     이상 행동이 1순위, 정상 행동이 2순위, 같은 순위 안에서는 확률이 높은 것
-    (확률이 같으면 튜플의 다음 값들: 끝날 때 판정과 같은지, 이어진 시간)."""
+    (확률이 같으면 튜플의 다음 값들: 끝날 때 판정과 같은지, 이어진 시간).
+    한 사람의 판정에는 먼저 apply_overrides로 예외(외출 > 장시간 체류)를 적용해서 넘긴다."""
     if not cands:
         return UNDECIDED, 0.0
     key = {k: (v if isinstance(v, tuple) else (v,)) for k, v in cands.items()}
@@ -1166,6 +1186,7 @@ def predict(tracks: list[Track], models: Models) -> list[Track]:
                                          or not cands):
             old = cands.get(tr.end_pred, (0.0, True, 0.0))
             cands[tr.end_pred] = (max(old[0], tr.end_prob), True, old[2])
+        cands, override_notes = apply_overrides(cands)
         best, prob = priority_pick(cands)
         if best != UNDECIDED:
             tr.final_pred, tr.final_prob = best, prob
@@ -1185,6 +1206,9 @@ def predict(tracks: list[Track], models: Models) -> list[Track]:
             note = (f"{why}: 진행 중 {tr.final_pred} {tr.final_prob:.0%}{when} "
                     f"→ 끝날 때 판정 {tr.end_pred} {tr.end_prob:.0%} 대신")
             tr.rule_note = note + (f" / 끝날 때 판정: {tr.rule_note}" if tr.rule_note else "")
+        if override_notes:
+            tr.rule_note = ("우선순위 예외: " + ", ".join(override_notes)
+                            + (f" / {tr.rule_note}" if tr.rule_note else ""))
     return tracks
 
 
