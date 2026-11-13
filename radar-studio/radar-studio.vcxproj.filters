@@ -20,6 +20,9 @@
     <ClCompile Include="src\device\retina.cpp">
       <Filter>device</Filter>
     </ClCompile>
+    <ClCompile Include="src\device\live_relay.cpp">
+      <Filter>device</Filter>
+    </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)pcr\point_cloud_recorder.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)thirdparty\zstd\lib\common\debug.c" />
     <ClCompile Include="$(MSBuildThisFileDirectory)thirdparty\zstd\lib\common\entropy_common.c" />
@@ -122,6 +125,9 @@
     </ClInclude>
     <ClInclude Include="src\my_app.h" />
     <ClInclude Include="src\device\retina.h">
+      <Filter>device</Filter>
+    </ClInclude>
+    <ClInclude Include="src\device\live_relay.h">
       <Filter>device</Filter>
     </ClInclude>
     <ClInclude Include="$(MSBuildThisFileDirectory)pcr\pcr.h" />

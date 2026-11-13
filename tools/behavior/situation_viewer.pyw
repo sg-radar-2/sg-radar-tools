@@ -11,6 +11,8 @@
 실행: situation_viewer.pyw 더블클릭 (처음 한 번은 결정 트리 학습에 10초 정도 걸림)
       '파일 열기...'에서 .pcr/CSV를 여러 개 고르거나 '폴더 열기...'로 폴더의 .pcr을 한꺼번에 열 수 있습니다.
       보고 있는 파일을 먼저 읽고, 나머지는 뒤에서 다음 파일부터 차례로 읽어 둡니다 (◀ ▶ 또는 PageUp/PageDown).
+      '● 실시간 (Radar Studio)': Radar Studio가 센서에 연결돼 있으면 UDP 127.0.0.1:29190으로 받은 데이터를
+      0.5초마다 판정해서 최신 시각을 따라가며 보여줍니다 (live_source.py, radar-studio/src/device/live_relay.cpp).
       명령줄: python tools/behavior/situation_viewer.pyw a.pcr b.pcr --model models/x.pkl
 필요: numpy, matplotlib, scikit-learn  (pip install numpy matplotlib scikit-learn)
 """
@@ -22,6 +24,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -58,6 +61,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.patches import Circle, Rectangle  # noqa: E402
 
+import live_source as L  # noqa: E402
 import scenario_sim as S  # noqa: E402
 import situation_core as C  # noqa: E402
 
@@ -79,6 +83,9 @@ DEFAULT_VIEW = {"xmin": -3.2, "xmax": 3.2, "ymin": 0.0, "ymax": 5.2, "fov": 90.0
 VIEW_MARGIN = 0.6           # 표시 영역 바깥으로 이만큼 더 보여줌 (영역 밖 트랙도 보이게)
 SHOW_AFTER_END_S = 3.0
 TICK_MS = 60
+LIVE_TICK_MS = 500          # 실시간: 이 간격으로 새 데이터를 판정하고 다시 그림
+LIVE_WINDOW_S = 180.0       # 실시간: 최근 이 시간만 판정·표시 (길수록 판정이 느려짐)
+LIVE_NAME = "실시간 (Radar Studio)"
 
 
 class Viewer(ttk.Frame):
@@ -102,6 +109,13 @@ class Viewer(ttk.Frame):
         self.demo_seed = 7
         self._slider_lock = False
         self._panel_cache = ""
+        # 실시간 (Radar Studio → UDP)
+        self.live: L.LiveReceiver | None = None
+        self._live_busy = False
+        self._live_result = None          # 뒤 스레드가 판정을 끝내면 (tracks, gen, latest_t, error)
+        self._live_done = (-1, -1)        # 마지막으로 판정한 (수신 version, 모델 gen)
+        self._live_cams: set = set()      # 이미 알린 촬영 (소리 한 번만)
+        self._live_follow = True          # 슬라이더가 끝에 있으면 최신을 따라감
         self._build()
         self._model_path = model_path     # 시작할 때 열 모델 (train_situation_gui에서 넘겨줌)
         self.after(100, lambda: self._load_models(initial))
@@ -113,6 +127,8 @@ class Viewer(ttk.Frame):
         ttk.Button(bar, text="파일 열기...", command=self.pick_files).pack(side="left")
         ttk.Button(bar, text="폴더 열기...", command=self.pick_folder).pack(side="left", padx=(4, 0))
         ttk.Button(bar, text="가짜 시나리오", command=self.load_demo).pack(side="left", padx=4)
+        self.live_btn = ttk.Button(bar, text="● 실시간 (Radar Studio)", command=self.toggle_live)
+        self.live_btn.pack(side="left", padx=(0, 4))
         ttk.Button(bar, text="모델 열기...", command=self.pick_model).pack(side="left")
         ttk.Button(bar, text="가짜 데이터로 다시 학습",
                    command=lambda: self._load_models(None, force=True)).pack(side="left", padx=4)
@@ -330,13 +346,137 @@ class Viewer(ttk.Frame):
         self.open_files([str(p) for p in ps])
 
     def open_files(self, paths):
+        self.stop_live()
         self._set_sources([{"name": Path(p).name, "path": str(p)} for p in paths])
 
     def load_demo(self, first=False):
+        self.stop_live()
         if not first:
             self.demo_seed += 1
         rows = [{k: str(v) for k, v in r.items()} for r in S.demo_sessions(self.demo_seed)]
         self._set_sources([{"name": f"가짜 시나리오 (seed {self.demo_seed})", "path": None, "rows": rows}])
+
+    # ------------------------------------------------------------------ 실시간 (Radar Studio)
+    def toggle_live(self):
+        if self.live is not None:
+            self.stop_live()
+            return
+        if self.models is None:
+            messagebox.showinfo("실시간", "결정 트리를 준비하는 중입니다. 잠시 후 다시 눌러주세요.")
+            return
+        rx = L.LiveReceiver(window_s=LIVE_WINDOW_S)
+        try:
+            rx.start()
+        except OSError as exc:
+            messagebox.showerror("실시간 연결 실패",
+                                 f"UDP {L.DEFAULT_PORT} 포트를 열지 못했습니다. 다른 뷰어 창이 이미 실시간으로 "
+                                 f"받고 있는지 확인하세요.\n\n{exc}")
+            return
+        self.live = rx
+        self._live_busy, self._live_result, self._live_done = False, None, (-1, -1)
+        self._live_cams, self._live_follow = set(), True
+        self.live_btn.configure(text="■ 실시간 끄기")
+        self._set_sources([{"name": LIVE_NAME, "path": None, "live": True}])
+        self.after(LIVE_TICK_MS, self._live_tick)
+
+    def stop_live(self):
+        if self.live is None:
+            return
+        self.live.stop()
+        self.live = None
+        self.live_btn.configure(text="● 실시간 (Radar Studio)")
+        for s_ in self.sources:
+            if s_.get("live"):
+                s_["name"] = LIVE_NAME + " - 멈춤 (마지막 화면)"
+        self.file_combo["values"] = [s_["name"] for s_ in self.sources]
+        if self.sources:
+            self.file_combo.current(max(self.cur, 0))
+        self.load_var.set("실시간 수신을 껐습니다.")
+
+    def _live_source(self):
+        return next((s_ for s_ in self.sources if s_.get("live")), None)
+
+    def _live_tick(self):
+        rx = self.live
+        if rx is None:
+            return
+        src = self._live_source()
+        if src is None:
+            self.stop_live()
+            return
+        # 뒤 스레드가 끝낸 판정 반영
+        res, self._live_result = self._live_result, None
+        if res is not None:
+            tracks, gen, err, now_t = res
+            if err:
+                self.load_var.set(f"실시간 판정 오류: {err}")
+            elif gen == self.gen:
+                src["tracks"], src["gen"], src["now_t"] = tracks, gen, now_t
+                if self.sources and self.sources[self.cur] is src:
+                    self._show_live()
+        # 센서 설정이 오면 표시 영역도 그 설정으로
+        if rx.spec and src.get("spec") != rx.spec:
+            src["spec"] = dict(rx.spec)
+            if self.follow_file.get() and self.sources[self.cur] is src:
+                self._fill_view_from_file()
+        # 상태 줄
+        if rx.error:
+            self.load_var.set(f"실시간 수신 오류: {rx.error}")
+        elif not rx.frames:
+            self.load_var.set(f"Radar Studio 기다리는 중 (UDP {L.DEFAULT_PORT})")
+        else:
+            age = time.monotonic() - rx.last_rx
+            self.load_var.set(f"● 수신 중  {rx.frames}프레임"
+                              + (f"  (마지막 수신 {age:.0f}초 전 - Studio 연결 확인)" if age > 2 else ""))
+        # 새 데이터(또는 새 모델)가 있으면 뒤에서 다시 판정
+        rows, ver = rx.snapshot()
+        if not self._live_busy and rows and (ver, self.gen) != self._live_done:
+            self._live_busy, self._live_done = True, (ver, self.gen)
+            models, gen, now_t = self.models, self.gen, rx.t
+
+            def work():
+                try:
+                    raw = C.tracks_from_rows(rows)
+                    for tr in raw:
+                        tr.session_end = now_t      # 마지막 행이 아니라 지금 시각이 '녹화 끝' (사라진 사람을 사라졌다고 봄)
+                    self._live_result = (C.analyze(raw, models), gen, None, now_t)
+                except Exception as exc:  # noqa: BLE001
+                    self._live_result = (None, gen, f"{type(exc).__name__}: {exc}", now_t)
+                finally:
+                    self._live_busy = False
+
+            threading.Thread(target=work, daemon=True).start()
+        self.after(LIVE_TICK_MS, self._live_tick)
+
+    def _show_live(self):
+        """실시간 판정 결과를 그림. 슬라이더가 끝에 있으면 최신 시각을 따라감."""
+        src = self._live_source()
+        tracks = (src or {}).get("tracks") or []
+        now_t = float((src or {}).get("now_t", 0.0))
+        if not tracks:
+            self._show_message(f"최근 {LIVE_WINDOW_S:.0f}초 동안 잡힌 사람이 없습니다. (수신 중)")
+            return
+        self.session_combo["values"] = [L.SESSION]
+        self.session_var.set(L.SESSION)
+        self.session_tracks = tracks
+        self.t_hi = max(now_t, 1.0)
+        self.t_lo = max(0.0, self.t_hi - LIVE_WINDOW_S)
+        self.time_scale.configure(from_=self.t_lo, to=self.t_hi)
+        self._cams = sorted(((c["t"], tr, c) for tr in tracks for c in tr.cameras), key=lambda e: e[0])
+        self.cam_list.delete(0, "end")
+        for t, tr, c in self._cams:
+            self.cam_list.insert("end", f"[촬영] {t - self.t_hi:6.1f}초  {C.track_name(tr)}  "
+                                        f"{c['situation']} ({c['prob']:.0%})")
+        if not self._cams:
+            self.cam_list.insert("end", f"(최근 {LIVE_WINDOW_S:.0f}초 동안 촬영 없음)")
+        new = {(round(t, 1), c["situation"]) for t, _, c in self._cams} - self._live_cams
+        if new:
+            self.bell()                   # 새 촬영 알림
+            self._live_cams |= new
+        keep = self.cur_t
+        self._setup_axes()
+        self.cur_t = self.t_hi if self._live_follow else min(max(keep, self.t_lo), self.t_hi)
+        self._render()
 
     def _set_sources(self, items):
         self._stop()
@@ -368,7 +508,13 @@ class Viewer(ttk.Frame):
             self._fill_view_from_file()
         self.file_combo.current(i)
         self.path_var.set(f"{i + 1}/{len(self.sources)}  {src['name']}")
-        if src["error"]:
+        if src.get("live"):
+            if src["tracks"] is None:
+                self._show_message(f"Radar Studio에서 데이터를 기다리는 중... (UDP 127.0.0.1:{L.DEFAULT_PORT})\n"
+                                   "Radar Studio에서 센서(또는 Radar Emulator)에 연결하면 바로 보입니다.")
+            else:
+                self._show_live()
+        elif src["error"]:
             self._show_message(f"읽지 못했습니다: {src['error']}")
         elif src["tracks"] is None or src["gen"] != self.gen:
             self._show_message("불러오는 중...")
@@ -457,6 +603,8 @@ class Viewer(ttk.Frame):
         for k in range(n):
             i = (start + k) % n
             s_ = self.sources[i]
+            if s_.get("live"):                # 실시간은 _live_tick이 따로 판정
+                continue
             if not s_["busy"] and s_["error"] is None and s_["gen"] != self.gen:
                 return i
         return None
@@ -504,9 +652,12 @@ class Viewer(ttk.Frame):
                     self.select_source(i)
         except queue.Empty:
             pass
-        done = sum(1 for s_ in self.sources if (s_["gen"] == self.gen) or s_["error"])
-        total = len(self.sources)
-        if total > 1 or done < total:
+        files = [s_ for s_ in self.sources if not s_.get("live")]   # 실시간 상태는 _live_tick이 표시
+        done = sum(1 for s_ in files if (s_["gen"] == self.gen) or s_["error"])
+        total = len(files)
+        if not files:
+            pass
+        elif total > 1 or done < total:
             self.load_var.set(f"판정 완료 {done}/{total}" + ("" if done == total else "  (뒤에서 읽는 중)"))
         else:
             self.load_var.set("")
@@ -627,7 +778,7 @@ class Viewer(ttk.Frame):
 
     # ------------------------------------------------------------------ 재생
     def toggle_play(self):
-        if not self.session_tracks:
+        if not self.session_tracks or self.live is not None:   # 실시간은 항상 최신을 따라감
             return
         self.playing = not self.playing
         self.play_btn.configure(text="⏸ 정지" if self.playing else "▶ 재생")
@@ -652,6 +803,8 @@ class Viewer(ttk.Frame):
         if self._slider_lock:
             return
         self.cur_t = float(v)
+        if self.live is not None:          # 실시간: 슬라이더를 끝에 두면 최신을 따라가고, 뒤로 당기면 멈춰서 봄
+            self._live_follow = self.cur_t >= self.t_hi - 0.3
         self._render()
 
     def _jump_to_camera(self, _e):
@@ -665,11 +818,16 @@ class Viewer(ttk.Frame):
         self._slider_lock = True
         self.time_scale.set(T)
         self._slider_lock = False
-        self.time_var.set(f"{T - self.t_lo:6.1f} / {self.t_hi - self.t_lo:.1f} 초")
+        if self._live_source() is not None:
+            self.time_var.set("● 최신" if T >= self.t_hi - 0.3 else f"{T - self.t_hi:6.1f}초 (과거)")
+        else:
+            self.time_var.set(f"{T - self.t_lo:6.1f} / {self.t_hi - self.t_lo:.1f} 초")
         self.now_line.set_xdata([T - self.t_lo])
 
+        # 실시간: 지금 시각이 마지막 프레임보다 조금 늦을 수 있어서, 그 정도는 아직 있는 것으로 봄
+        grace = 0.6 if self._live_source() is not None else 0.0
         active = [tr for tr in self.session_tracks
-                  if tr.t0 <= T <= tr.t1 and not getattr(tr, "out_of_range", False)]   # 영역 안 사람만
+                  if tr.t0 <= T <= tr.t1 + grace and not getattr(tr, "out_of_range", False)]   # 영역 안 사람만
         n_people = len(active)
         panel = []
         for tr in self.session_tracks:
@@ -679,7 +837,7 @@ class Viewer(ttk.Frame):
                 dot.set_offsets(np.empty((0, 2)))
                 label.set_text("")
                 continue
-            ended = T > tr.t1
+            ended = T > tr.t1 + grace
             i = int(np.searchsorted(tr.t_abs, T, side="right") - 1)
             i = max(0, min(i, len(tr.t_abs) - 1))
             j = int(np.searchsorted(tr.t_abs, tr.t_abs[i] - TRAIL_S))

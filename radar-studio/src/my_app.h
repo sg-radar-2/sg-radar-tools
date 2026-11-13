@@ -34,6 +34,7 @@ namespace retina
 	struct DeviceInfo;
 	class DeviceClient;
 	class DeviceFinder;
+	class LiveRelay;
 }
 
 struct WindowRect
@@ -161,6 +162,9 @@ private:
 	std::unique_ptr<retina::DeviceFinder> m_deviceFinder;
 	std::mutex m_finderMutex;
 
+	// Relays received frames to the situation viewer on this PC (UDP 127.0.0.1:29190).
+	// Declared before m_client so it is destroyed after the client that calls it.
+	std::unique_ptr<retina::LiveRelay> m_liveRelay;
 	std::unique_ptr<retina::DeviceClient> m_client;
 	std::mutex m_clientMutex;
 	std::atomic<ConnectionStatus> m_connectionStatus{ ConnectionStatus::Disconnected };

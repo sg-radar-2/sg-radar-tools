@@ -152,6 +152,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\device\live_relay.cpp" />
     <ClCompile Include="src\device\retina.cpp" />
     <ClCompile Include="src\my_app.cpp" />
     <ClCompile Include="src\ui\implot3d_custom.cpp" />
@@ -161,6 +162,7 @@
     <ClCompile Include="src\ui\window\sensor_window.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="src\device\live_relay.h" />
     <ClInclude Include="src\device\retina.h" />
     <ClInclude Include="src\my_app.h" />
     <ClInclude Include="src\ui\implot3d_custom.h" />

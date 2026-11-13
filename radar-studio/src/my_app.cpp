@@ -2,6 +2,7 @@
 
 #include "my_app.h"
 
+#include "device/live_relay.h"
 #include "device/retina.h"
 #include "ui/implot3d_custom.h"
 #include "ui/window/analysis_window.h"
@@ -81,6 +82,9 @@ MyApp::MyApp()
 	if (m_sensorWindow)
 		m_sensorWindow->syncDraftFromDevice();
 	m_pendingSensorSpecNotify = true;
+
+	m_liveRelay = std::make_unique<retina::LiveRelay>(log());
+	m_liveRelay->setSensorSpec(m_deviceInfo->sensorSpec);   // sensor spec loaded from imgui.ini
 
 	if (m_windowRestored.hasPos())
 	{
@@ -275,6 +279,8 @@ void MyApp::setSensorSpec(const pcr::SensorSpec& spec)
 {
 	m_deviceInfo->sensorSpec = spec;
 	m_pendingSensorSpecNotify = true;
+	if (m_liveRelay)
+		m_liveRelay->setSensorSpec(spec);
 	if (ImGui::GetCurrentContext() != nullptr)
 		ImGui::MarkIniSettingsDirty();
 }
@@ -843,6 +849,11 @@ void MyApp::connectToDeviceAsync(const std::string& host)
 			{
 				m_connectionStatus.store(ConnectionStatus::Connected);
 				m_connectionUpdated.store(true);
+			});
+		m_client->setOnFrame([this](const retina::Frame& frame)
+			{
+				if (m_liveRelay)
+					m_liveRelay->send(frame);   // called on the network thread; LiveRelay locks internally
 			});
 	}
 
