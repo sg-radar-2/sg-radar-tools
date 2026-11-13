@@ -70,7 +70,7 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 UI_FONT = ("Malgun Gothic", 10) if sys.platform.startswith("win") else ("Noto Sans CJK KR", 10)
 COLORS = {
     S.PASS: "#6baed6", S.RETURN: "#41ab5d", S.GO_OUT: "#a1d99b", S.VISIT: "#fdae6b", S.DELIVERY: "#fdd0a2",
-    S.DWELL: "#fb6a4a", S.LOITER: "#de2d26", S.REPEAT: "#a50f15", S.DOORLOCK: "#67000d",
+    S.DWELL: "#fb6a4a", S.LOITER: "#de2d26", S.REPEAT: "#a50f15",
     S.UNDECIDED: "#d0d0d0",
 }
 TRACK_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b", "#e377c2"]
@@ -218,13 +218,14 @@ class Viewer(ttk.Frame):
             self.result.heading(c, text=h)
             self.result.column(c, width=w, anchor="w" if c in ("session", "camera", "behaviors", "verdict")
                                else "center")
+        self.result.tag_configure("near", foreground="#7a5c00", background="#fff3b0")
         self.result.pack(fill="both", expand=True)
         self.result.bind("<Double-1>", self._open_from_result)
         ttk.Label(res, foreground="#666", justify="left", text=(
             "최종 판정: 이상 행동 1순위(진행 중 60% 이상으로 1초 넘게 이어진 것), 없으면 정상 행동 중 확률이 "
             "가장 높은 것 (끝날 때 정의 조건을 지키는 것만)\n"
             "녹화 판정: 그 세션 사람들의 최종 판정 중 같은 우선순위로 하나 (세션 첫 줄에 표시)\n"
-            "판정: 최종 판정이 정답과 같은지\n"
+            "판정: 최종 판정이 정답과 같은지 (노란 △ = 방문/귀가, 배회/장시간 체류처럼 구분이 어려운 쌍끼리 바뀜, 맞음으로 셈)\n"
             "촬영: 이상 상황이면 촬영했는지, 정상 상황이면 촬영하지 않았는지 (정답이 있는 데이터만)\n"
             "행을 더블클릭하면 그 세션을 재생합니다. 여러 파일을 열면 읽은 파일부터 차례로 채워집니다.")
                   ).pack(anchor="w", pady=(6, 0))
@@ -691,7 +692,7 @@ class Viewer(ttk.Frame):
             label.set_text(f"{C.track_name(tr)} {sit}")
             label.set_position((tr.xs[i] + 0.15, tr.ys[i] + 0.15))
             label.get_bbox_patch().set_facecolor(COLORS.get(sit, "white"))
-            label.set_color("white" if sit in (S.LOITER, S.REPEAT, S.DOORLOCK) else "black")
+            label.set_color("white" if sit in (S.LOITER, S.REPEAT) else "black")
             feat = tr.final_feat if ended else tr.sfeat[i]
             panel.append((tr, i, ended, sit, prob, feat, max(n_people, 1)))
 
@@ -791,17 +792,18 @@ class Viewer(ttk.Frame):
             cams = ", ".join(f"{c['t'] - tr.t0:.1f}초 {c['situation']}" for c in tr.cameras) or "-"
             if tr.truth_final:
                 n += 1
-                good = tr.final_pred == tr.truth_final
-                ok += good
+                mark = C.match_kind(tr.final_pred, tr.truth_final)   # △: 구분이 어려운 쌍, 오류로 안 셈
+                ok += mark != "X"
                 should = tr.truth_final in S.ABNORMAL
                 cam_good = bool(tr.cameras) == should
                 cam_n += 1
                 cam_ok += cam_good
-                mark, cmark = ("O" if good else "X"), ("O" if cam_good else "X")
+                cmark = "O" if cam_good else "X"
             else:
                 mark = cmark = "-"
             iid = self.result.insert("", "end", values=(label, vtxt, C.track_name(tr), truth, tr.final_pred,
-                                                        f"{tr.final_prob:.0%}", mark, beh or "-", cams, cmark))
+                                                        f"{tr.final_prob:.0%}", mark, beh or "-", cams, cmark),
+                                     tags=("near",) if mark == "△" else ())
             self._result_map[iid] = (si, tr.session)
         if n:
             self.summary_var.set(f"최종 판정 {ok}/{n} 맞음   ·   촬영 판단 {cam_ok}/{cam_n} 맞음 "

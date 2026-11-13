@@ -3,7 +3,7 @@
 세 개의 결정 트리를 씁니다.
   1) 움직임 트리 (프레임마다): 속도, 문 쪽 속도, 문 방향 비율, 도플러 → 다가옴 / 멀어짐 / 지나감 / 정지
   2) 상황 트리 (0.5초마다, 지금까지의 흐름): 머문 시간, 나타난 위치, 접근 횟수, 움직임 등
-     → 통과 / 귀가 / 외출 / 방문 / 배달 / 장시간 체류 / 배회 / 반복 접근 / 도어락 조작 시도 / 판단 중
+     → 통과 / 귀가 / 외출 / 방문 / 배달 / 장시간 체류 / 배회 / 반복 접근 / 판단 중
   3) 최종 판정 트리 (사람이 사라지거나 녹화가 끝난 순간): 상황 트리와 같은 특징으로, '판단 중' 없이
      어떤 상황이었는지만 고름 (진행 중 판정과 최종 판정을 한 트리로 같이 하면 최종 샘플이 너무 적어서 따로 둠)
   고른 상황이 상황 정의 조건(RULES)을 어기면 다음으로 확률 높은 상황을 고릅니다.
@@ -28,13 +28,14 @@ from pathlib import Path
 import numpy as np
 
 from scenario_sim import (ABNORMAL, M_APPROACH, M_LEAVE, M_PASS, M_STILL,  # noqa: F401
-                          SITUATIONS, UNDECIDED, training_episodes)
+                          PASS, SITUATIONS, UNDECIDED, training_episodes)
 
 HERE = Path(__file__).resolve().parent
 MODEL_PATH = HERE / "models" / "situation_trees.pkl"
-MODEL_VERSION = 3          # 2: 트랙 잇기(멈춘 사람) + 특징 27개, 방문·배달 분리
+MODEL_VERSION = 4          # 2: 트랙 잇기(멈춘 사람) + 특징 27개, 방문·배달 분리
                            # 3: 트랙 시작 직후(속도를 아직 못 구하는 구간)를 정지로 세던 버그 수정,
                            #    '문에서 나옴'을 처음 움직임 방향으로 판단, 특징 5개 추가(32개), 상황 정의 조건(RULES) 적용
+                           # 4: '도어락 조작 시도' 상황 삭제, '문에서 나옴'을 첫 프레임 거리(1.2m)+방향으로 판단
 M_UNKNOWN = "판단 전"      # 트랙 시작 직후 속도를 아직 구할 수 없는 구간 (정지·움직임 어느 쪽으로도 안 셈)
 
 # --- 전처리·판정 상수
@@ -80,11 +81,23 @@ SIDE_CHANGE_DX = 1.0     # 처음 잡힌 곳과 x 부호가 반대이고 이만�
 OUT_MAX_APPROACH = 0.4   # 외출: 처음 잡힌 곳보다 이 이상 문에 가까워지면 외출이 아님
 # 배회: 측정 영역 안에 이 시간 이상 있었고 (멈춘 시간 포함)
 LOITER_MIN_S = 15.0
-# 장시간 체류와 구분: 그동안 절반 이상은 움직였고, 이만큼 이상 걸어 다녀야 배회 (서 있기만 하면 체류)
-LOITER_MIN_MOVE_FRAC = 0.3
+# 장시간 체류와 구분: 그동안 25% 이상은 움직였고, 이만큼 이상 걸어 다녀야 배회 (서 있기만 하면 체류)
+LOITER_MIN_MOVE_FRAC = 0.25
 LOITER_MIN_PATH = 5.0
+# 짧은 트랙: 범위 안에 이 시간 이하로만 잡혔으면 끝날 때 판정에서 통과 확률에 가중치를 곱함 (다시 합 1로 맞춤)
+# 문에서 나온 사람(외출 후보)은 제외
+SHORT_TRACK_S = 3.0
+SHORT_PASS_WEIGHT = 2.0
+# 끝날 때 판정: 트리 1순위가 조건에 막혔을 때 조건을 지키는 다음 상황이 이 비율 미만이면
+# 잎에서 그냥 고르지 않고 트리를 거슬러 올라가 더 넓게 묶인 노드에서 고름
+FALLBACK_MIN_SHARE = 0.3
 # '문에서 나옴' 판단. 레이더는 사람이 문에서 나와 1~2걸음 걸은 뒤에야 트랙을 만들어서(실제 녹화: 1.1~1.7m)
 # 거리만으로는 문에서 나온 사람을 못 알아봄 → 처음 잡힌 뒤 짧은 시간 동안 레이더에서 곧장 멀어지면 문에서 나온 것
+DOOR_APPEAR_R = 1.2      # 처음 잡힌 순간(첫 프레임)이 이 거리 이하면 바로 '문에서 나옴'
+                         # (외출 녹화는 딱 1.0m 근처에서 처음 잡히는데, 처음 5프레임 평균 < 1.0m로 보면 빨리 멀어져서 놓침.
+                         #  1.33m에서 잡힌 통과 1-8이 있어서 그보다 작게)
+DOOR_APPEAR_RADIAL = 0.5 # 단, 처음 움직임이 있는데 레이더에서 곧장 멀어지는 비율이 이보다 작으면(옆으로 지나감) 문에서 나옴 아님
+                         # (1-2: 1.0m에서 잡혔지만 문 앞을 스쳐 지나간 통과)
 DOOR_EXIT_R = 1.75       # 처음 잡힌 곳이 이 거리 안이고
 DOOR_EXIT_WIN_S = 0.6    # 처음 이 시간 동안
 DOOR_EXIT_MIN_MOVE = 0.25  # 이만큼 이상 움직였는데
@@ -321,8 +334,9 @@ def check_model(m) -> None:
     """특징 목록이 지금 코드와 같은지 확인 (예전 특징으로 학습한 모델은 다시 학습해야 함)"""
     feats = getattr(m, "feature_names", None) or []     # 특징 목록이 없는 건 첫 버전 모델
     if list(feats) == SITUATION_FEATURES and getattr(m, "version", 0) < MODEL_VERSION:
-        raise ValueError("이 모델은 특징 계산이 고쳐지기 전 코드로 학습되었습니다 "
-                         "(트랙 시작 구간을 정지로 세던 버그). 정답 표로 다시 학습해주세요.")
+        raise ValueError(f"이 모델은 예전 코드(모델 버전 {getattr(m, 'version', 0)})로 학습되었습니다. "
+                         f"지금 코드(버전 {MODEL_VERSION})는 상황 목록·특징 계산이 바뀌어서 "
+                         "정답 표로 다시 학습해주세요.")
     if list(feats) != SITUATION_FEATURES:
         raise ValueError(f"이 모델은 예전 특징({len(feats)}개)으로 학습되어 지금 코드(특징 {len(SITUATION_FEATURES)}개)와 "
                          "맞지 않습니다. 정답 표로 다시 학습해주세요.")
@@ -543,22 +557,33 @@ def _head_kind(tr: Track, region: "Region | None") -> str:
     """처음 나타난 곳의 종류: door(문에서 나옴) / edge(외곽에서 들어옴) / inside(영역 안에서 나타남).
     문 바로 앞(DOOR_ENTER_R 안)에서 처음 잡혔거나, 조금 떨어진 곳(DOOR_EXIT_R 안)에서 잡혔어도
     처음 DOOR_EXIT_WIN_S초 동안 레이더에서 곧장 멀어지면 문에서 나온 것으로 본다."""
+    r0 = math.hypot(float(tr.x[0]), float(tr.y[0]))     # 처음 잡힌 순간 (빨리 멀어지므로 평균 말고 첫 프레임)
+    move, radial = _head_motion(tr)
+    if r0 <= DOOR_APPEAR_R:
+        # 문 바로 앞에서 잡혔어도 옆으로 지나가고 있었으면 문에서 나온 게 아님 (문 앞을 스쳐 간 통과)
+        # 거의 안 움직였거나 프레임이 모자라면 방향을 알 수 없으니 문에서 나온 것으로 봄
+        if move < DOOR_EXIT_MIN_MOVE or radial >= DOOR_APPEAR_RADIAL:
+            return "door"
     hx, hy = _head(tr)
     kind = _end_kind(hx, hy, region)
     if kind == "door":
         return kind
-    r0 = math.hypot(float(tr.x[0]), float(tr.y[0]))     # 처음 잡힌 순간 (빨리 멀어지므로 평균 말고 첫 프레임)
-    if r0 < DOOR_EXIT_R:
-        t = tr.t_abs - tr.t_abs[0]
-        vis = ~tr.hidden if tr.hidden is not None else np.ones(len(t), dtype=bool)
-        k = np.where(vis & (t <= DOOR_EXIT_WIN_S))[0]
-        if len(k) >= 3:
-            x, y = tr.x[k], tr.y[k]
-            move = math.hypot(x[-1] - x[0], y[-1] - y[0])
-            dr = math.hypot(x[-1], y[-1]) - math.hypot(x[0], y[0])
-            if move >= DOOR_EXIT_MIN_MOVE and dr / move >= DOOR_EXIT_RADIAL:
-                return "door"
+    if r0 < DOOR_EXIT_R and move >= DOOR_EXIT_MIN_MOVE and radial >= DOOR_EXIT_RADIAL:
+        return "door"
     return kind
+
+
+def _head_motion(tr: Track) -> tuple[float, float]:
+    """처음 DOOR_EXIT_WIN_S초 동안 (움직인 거리, 그중 레이더에서 곧장 멀어진 비율). 보이는 프레임이 2개 미만이면 (0, 0)"""
+    t = tr.t_abs - tr.t_abs[0]
+    vis = ~tr.hidden if tr.hidden is not None else np.ones(len(t), dtype=bool)
+    k = np.where(vis & (t <= DOOR_EXIT_WIN_S))[0]
+    if len(k) < 2:
+        return 0.0, 0.0
+    x, y = tr.x[k], tr.y[k]
+    move = math.hypot(x[-1] - x[0], y[-1] - y[0])
+    dr = math.hypot(x[-1], y[-1]) - math.hypot(x[0], y[0])
+    return move, (dr / move if move > 0 else 0.0)
 
 
 def _was_stopping(tr: Track, win: float = 1.0) -> bool:
@@ -827,15 +852,34 @@ def final_truth(tr: Track) -> str:
     return getattr(tr, "final_fallback", None)
 
 
-def _similar(proba: np.ndarray, classes, feat: np.ndarray, final: bool, orig: str):
-    """정답(orig)이 조건에 안 맞을 때: 조건을 지키는 상황 중 트리 확률이 가장 높은 것 ('판단 중' 제외)"""
-    for k in np.argsort(-proba):
-        c = str(classes[k])
-        if proba[k] <= 0:
-            break
-        if c not in (UNDECIDED, orig) and not rule_violations(c, feat, final):
-            return c
-    return None
+def _similar_node(tree, feat: np.ndarray, final: bool, orig: str, min_share: float = 0.0,
+                  boost: dict | None = None):
+    """정답(orig)이 조건에 안 맞을 때: 조건을 지키는 상황 중 가장 비슷한 것 ('판단 중' 제외).
+    이 샘플이 떨어진 잎의 상황 분포에서 고르고, 잎에 조건을 지키는 상황이 없거나 그 비율이 min_share 미만이면
+    부모 노드로 한 칸씩 올라감 (갈라지기 전까지 같이 묶여 있던 것 = 다음으로 비슷한 것).
+    boost: {상황: 배수} 노드 분포에 곱하는 가중치 (짧은 트랙의 통과 등).
+    돌려줌: (상황, 그 노드에서의 비율, 잎에서 올라간 칸 수). 뿌리까지 min_share를 못 넘으면 가장 비율이 높았던 것,
+    조건을 지키는 상황이 아예 없으면 (None, 0, 0)."""
+    path = np.sort(tree.decision_path(feat[None, :]).indices)[::-1]     # 잎 → 뿌리 (자식 번호가 부모보다 큼)
+    ok = np.array([str(c) not in (UNDECIDED, orig) and not rule_violations(str(c), feat, final)
+                   for c in tree.classes_])
+    mult = np.array([(boost or {}).get(str(c), 1.0) for c in tree.classes_])
+    best = (None, 0.0, 0)
+    for up, node in enumerate(path):
+        v = tree.tree_.value[node][0] * mult
+        v = v / v.sum() if v.sum() > 0 else v
+        w = v * ok
+        if w.max() > 0:
+            k = int(np.argmax(w))
+            if w[k] >= min_share:
+                return str(tree.classes_[k]), float(w[k]), up
+            if w[k] > best[1]:
+                best = (str(tree.classes_[k]), float(w[k]), up)
+    return best
+
+
+def _similar(tree, feat: np.ndarray, final: bool, orig: str):
+    return _similar_node(tree, feat, final, orig)[0]
 
 
 def relabel_tree(people: list[Track], depth: int, min_leaf: int):
@@ -864,14 +908,12 @@ def assign_fallback(trs: list[Track], tree) -> None:
         tr.fallback, tr.final_fallback = {}, None
         idx = [i for i in snap_index(tr) if tr.truth_situation[i] != UNDECIDED
                and rule_violations(tr.truth_situation[i], tr.sfeat[i], False)]
-        if idx:
-            for i, pr in zip(idx, tree.predict_proba(tr.sfeat[idx])):
-                alt = _similar(pr, tree.classes_, tr.sfeat[i], False, tr.truth_situation[i])
-                if alt:
-                    tr.fallback[i] = alt
+        for i in idx:
+            alt = _similar(tree, tr.sfeat[i], False, tr.truth_situation[i])
+            if alt:
+                tr.fallback[i] = alt
         if final_ok(tr):
-            pr = tree.predict_proba(tr.final_feat[None, :])[0]
-            tr.final_fallback = _similar(pr, tree.classes_, tr.final_feat, True, tr.truth_final)
+            tr.final_fallback = _similar(tree, tr.final_feat, True, tr.truth_final)
 
 
 def _snapshots(tr: Track, final: bool = True):
@@ -1069,7 +1111,7 @@ def analyze(tracks: list[Track], models: Models) -> list[Track]:
 
 
 # 상황 정의로 정해진 조건. 결정 트리 확률이 높아도 이 조건을 어기는 상황은 고르지 않는다.
-# 학습할 때도 이 조건을 어기는 순간은 정답을 '판단 중'으로 바꿔서 학습한다.
+# 학습할 때도 이 조건을 어기는 순간은 정답을 조건을 지키는 가장 비슷한 상황으로 바꿔서 학습한다 (assign_fallback).
 #   final=True  : 사라진 순간(최종 판정)에만 확인하는 조건
 #   final=False : 진행 중에도 항상 확인하는 조건
 def _at_door_end(f):
@@ -1092,6 +1134,7 @@ RULES = [
      lambda f: f["approach_depth"] < OUT_MAX_APPROACH),
     ("외출", True, "문으로 사라지면 외출 아님", lambda f: f["ended_at_door"] < 0.5),
     ("통과", True, "문으로 사라지면 통과 아님", lambda f: f["ended_at_door"] < 0.5),
+    ("통과", False, "문에서 나온 사람이면 통과 아님 (외출)", lambda f: f["appear_door"] < 0.6),
     ("반복 접근", False, f"최근 {int(ENTRY_WINDOW_S)}초 안에 2번 이상 나타나야 함", lambda f: f["edge_entries"] >= 2),
     ("배회", False, f"범위 안에 {int(LOITER_MIN_S)}초 이상 있어야 함 (멈춘 시간 포함)",
      lambda f: f["elapsed"] >= LOITER_MIN_S),
@@ -1117,7 +1160,8 @@ def rules_text() -> str:
 def places_text() -> str:
     """문·외곽을 어떻게 판단하는지 (보고서·화면 표시용, 지금 설정값으로)"""
     over = ", ".join(f"{w} > {', '.join(sorted(l))}" for w, l in PRIORITY_OVERRIDES.items())
-    return (f"문에서 나옴: 레이더 {DOOR_ENTER_R:g}m 안에서 처음 잡힘, 또는 {DOOR_EXIT_R:g}m 안에서 처음 잡힌 뒤 "
+    return (f"문에서 나옴: 레이더 {DOOR_APPEAR_R:g}m 이하에서 처음 잡힘(첫 프레임, 단 처음 움직임 중 "
+            f"곧장 멀어지는 비율이 {DOOR_APPEAR_RADIAL:.0%} 미만이면 옆으로 지나가는 것이라 제외), 또는 {DOOR_EXIT_R:g}m 안에서 처음 잡힌 뒤 "
             f"{DOOR_EXIT_WIN_S:g}초 동안 {DOOR_EXIT_MIN_MOVE:g}m 이상 움직였고 그중 {DOOR_EXIT_RADIAL:.0%} 이상이 "
             f"레이더에서 곧장 멀어지는 방향\n"
             f"문으로 사라짐: 레이더 {DOOR_ENTER_R:g}m 안에서 사라짐\n"
@@ -1161,6 +1205,21 @@ def _sustained(tr: Track, hold_s: float = CAMERA_HOLD_S, min_prob: float = CAMER
         else:
             run_s, run_kind, run_max = 0.0, None, 0.0
     return out
+
+
+# 레이더로 구분하기 어려운 상황 쌍: 서로 바뀌어도 오류로 세지 않음 (평가 표에서 노란색 △)
+#   방문 ↔ 귀가: 바로 들어가면 기다린 시간 말고는 단서가 없음
+#   배회 ↔ 장시간 체류: 오래 머물면서 섞여 나옴 (둘 다 이상 행동이라 촬영은 같음)
+SIMILAR_PAIRS = [{"방문", "귀가"}, {"배회", "장시간 체류"}]
+
+
+def match_kind(pred: str, truth: str) -> str:
+    """판정과 정답 비교: "O"(같음) / "△"(구분이 어려운 쌍, 오류 아님) / "X"(틀림)"""
+    if pred == truth:
+        return "O"
+    if any({pred, truth} <= p for p in SIMILAR_PAIRS):
+        return "△"
+    return "X"
 
 
 # 우선순위 예외: 한 사람에게 왼쪽 행동이 후보로 있으면 오른쪽 행동들은 후보에서 뺀다.
@@ -1221,10 +1280,37 @@ def predict(tracks: list[Track], models: Models) -> list[Track]:
         tr.sit_prob = np.array([q for _, q in picks])
         ftree = getattr(models, "final", None) or models.situation
         fp = ftree.predict_proba(tr.final_feat[None])[0]
+        short_note = ""
+        boost = None
+        ff = dict(zip(SITUATION_FEATURES, tr.final_feat))
+        dur = float(ff["elapsed"])
+        # 문에서 나온 사람(외출 조건을 지킴)은 짧아도 통과로 밀지 않음 (나오자마자 범위를 벗어나는 외출이 많음)
+        if dur <= SHORT_TRACK_S and ff["appear_door"] < 0.6 and PASS in ftree.classes_:
+            boost = {PASS: SHORT_PASS_WEIGHT}
+            k = list(ftree.classes_).index(PASS)
+            before = fp[k]
+            fp = fp.copy()
+            fp[k] *= SHORT_PASS_WEIGHT
+            fp /= fp.sum()
+            if fp[k] != before:
+                short_note = (f"{dur:.1f}초로 짧아서 통과 확률 ×{SHORT_PASS_WEIGHT:g} "
+                              f"({before:.0%} → {fp[k]:.0%})")
         tr.final_pred, tr.final_prob = _pick(fp, ftree.classes_, tr.final_feat, True)
         raw_best = ftree.classes_[fp.argmax()]
+        up_note = ""
+        blocked = raw_best != tr.final_pred and raw_best != UNDECIDED     # 트리 1순위가 조건에 막힘
+        if (hasattr(ftree, "decision_path")
+                and ((tr.final_pred == UNDECIDED and tr.final_prob <= 0)
+                     or (blocked and tr.final_prob < FALLBACK_MIN_SHARE))):
+            # 조건을 지키는 상황이 없거나 너무 낮은 확률 → 트리를 거슬러 올라가 더 넓게 묶인 노드에서 고름
+            alt, share, up = _similar_node(ftree, tr.final_feat, True, str(raw_best),
+                                           FALLBACK_MIN_SHARE, boost)
+            if alt:
+                tr.final_pred, tr.final_prob = alt, share
+                up_note = (f" (조건을 지키는 상황이 {FALLBACK_MIN_SHARE:.0%} 미만이라 트리를 {up}칸 올라간 "
+                           f"노드에서 가장 많은 상황)" if up else "")
         if raw_best == tr.final_pred:
-            tr.rule_note = ""
+            tr.rule_note = short_note
         elif raw_best == UNDECIDED:
             tr.rule_note = (f"트리는 판단 중 {fp.max():.0%}였지만 사람이 사라졌으므로 "
                             f"다음으로 확률 높은 {tr.final_pred} {tr.final_prob:.0%}")
@@ -1232,7 +1318,9 @@ def predict(tracks: list[Track], models: Models) -> list[Track]:
             why = "; ".join(rule_violations(str(raw_best), tr.final_feat, True))
             path = describe_path(tr, model_region(models))
             tr.rule_note = (f"결정 트리 1순위는 {raw_best} {fp.max():.0%}였지만 {raw_best}의 조건 '{why}'에 안 맞음 ("
-                            f"{path}) → 조건을 지키는 다음 순위 {tr.final_pred} {tr.final_prob:.0%}")
+                            f"{path}) → 조건을 지키는 다음 순위 {tr.final_pred} {tr.final_prob:.0%}{up_note}")
+        if short_note and raw_best != tr.final_pred:
+            tr.rule_note = short_note + "; " + tr.rule_note
         # 카메라 촬영: 이상 상황이 CAMERA_HOLD_S 동안 유지되면 1회 (상황마다)
         tr.cameras = []
         run_s, run_kind, fired = 0.0, None, set()

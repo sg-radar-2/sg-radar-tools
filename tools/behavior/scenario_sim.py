@@ -39,13 +39,12 @@ DELIVERY = "배달"
 DWELL = "장시간 체류"
 LOITER = "배회"
 REPEAT = "반복 접근"
-DOORLOCK = "도어락 조작 시도"
 UNDECIDED = "판단 중"
 
-SITUATIONS = [PASS, RETURN, GO_OUT, VISIT, DELIVERY, DWELL, LOITER, REPEAT, DOORLOCK]
+SITUATIONS = [PASS, RETURN, GO_OUT, VISIT, DELIVERY, DWELL, LOITER, REPEAT]
 ALIASES = {"배달/택배": DELIVERY, "택배": DELIVERY, "배달·택배": DELIVERY}   # 정답 표에서 같은 뜻으로 받는 이름
 IDLE_FAR = "멀리 서 있기"   # 학습용 '해당 없음' 예시 (정답은 끝까지 '판단 중')
-ABNORMAL = {DWELL, LOITER, REPEAT, DOORLOCK}
+ABNORMAL = {DWELL, LOITER, REPEAT}
 
 # 움직임 이름
 M_APPROACH = "다가옴"
@@ -65,7 +64,7 @@ class Frame:
     t: float
     x: float
     y: float
-    hand: bool = False      # 손을 움직이는 중 (노크, 도어락 조작)
+    hand: bool = False      # 손을 움직이는 중 (노크, 비밀번호 입력)
     crouch: bool = False    # 숙이거나 앉음 (택배 내려놓기)
     situation: str = UNDECIDED
 
@@ -215,16 +214,6 @@ def episode(kind: str, rng: random.Random) -> list[Frame]:
                 t_dec = p.t
             p.stay(rng.uniform(1.0, 4.0))
         p.mark(t_dec, REPEAT)
-
-    elif kind == DOORLOCK:
-        p = Path_(*_far_point(rng))
-        p.walk_to(rng.uniform(-0.1, 0.1), rng.uniform(0.3, 0.45), walk())
-        t_stop = p.t
-        total = rng.uniform(15, 30)
-        while p.t < t_stop + total:
-            p.stay(rng.uniform(2, 6), hand=True, crouch=rng.random() < 0.25)
-        p.walk_to(*_far_point(rng), walk())
-        p.mark(t_stop + 8, DOORLOCK)
 
     elif kind == IDLE_FAR:
         p = Path_(*_far_point(rng, (2.5, 4.5)))

@@ -213,7 +213,7 @@ class TrainApp(ttk.Frame):
         ttk.Label(bar, text="보기").pack(side="right", padx=4)
         self.split_var.trace_add("write", lambda *_: self.fill_results())
         self.only_bad = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="틀린 것만", variable=self.only_bad,
+        ttk.Checkbutton(bar, text="틀린 것만 (노란 △ 포함)", variable=self.only_bad,
                         command=self.fill_results).pack(side="right", padx=8)
         cols = RESULT_COLS
         heads = ("구분", "파일", "녹화 판정", "정답", "사람(트랙)", "길이", "최종 판정", "확률", "판정",
@@ -222,10 +222,13 @@ class TrainApp(ttk.Frame):
                                     (45, 65, 130, 85, 85, 50, 90, 45, 40, 300, 190, 95, 140, 120), pady=(6, 0))
         self.res_tree.tag_configure("good", foreground="#1b7f3b")
         self.res_tree.tag_configure("bad", foreground="#c0161b")
+        # △: 구분이 어려운 쌍(방문/귀가, 배회/장시간 체류)끼리 바뀐 것. 오류로 세지 않음
+        self.res_tree.tag_configure("near", foreground="#7a5c00", background="#fff3b0")
         self.res_tree.bind("<Double-1>", self.open_row)
         ttk.Label(rs, foreground="#666", justify="left", text=(
             "최종 판정: 이상 행동이 1순위(진행 중 60% 이상으로 1초 넘게 이어진 이상 행동, 끝날 때 판정 포함), "
-            "없으면 끝날 때 판정(정상 행동). 같은 순위면 확률이 높은 것. 판정 = 최종 판정이 정답과 같은지 (O/X)\n"
+            "없으면 끝날 때 판정(정상 행동). 같은 순위면 확률이 높은 것. 판정 = 최종 판정이 정답과 같은지 (O/X). "
+            "노란 △ = 레이더로 구분이 어려운 쌍(방문/귀가, 배회/장시간 체류)끼리 바뀜, 오류로 세지 않음\n"
             "녹화 판정: 그 녹화의 사람들 최종 판정 중 같은 우선순위로 하나 (녹화 첫 줄에 표시)\n"
             "근거: 정의 조건 때문에 판정이 바뀌었으면 그 내용, 아니면 최종 판정 트리가 지나온 질문 (앞 3개)\n"
             "파일 촬영 판단: 이상 상황 녹화면 촬영했어야 맞고, 정상 상황이면 촬영하지 않아야 맞음\n"
@@ -260,7 +263,7 @@ class TrainApp(ttk.Frame):
     @staticmethod
     def _rules_intro() -> str:
         return ("상황 정의 조건 (결정 트리가 골라도 이 조건을 어기면 다음으로 확률 높은 상황을 고름.\n"
-                "학습할 때도 이 조건을 아직 못 채운 순간은 정답을 '판단 중'으로 바꿔서 학습함)\n\n"
+                "학습할 때도 이 조건을 어기는 순간은 정답을 조건을 지키는 가장 비슷한 상황으로 바꿔서 학습함)\n\n"
                 + C.rules_text() + "\n\n" + C.places_text() + "\n"
                 "(위 값은 situation_core.py의 설정값입니다)\n")
 
@@ -467,7 +470,7 @@ class TrainApp(ttk.Frame):
                     self.check_text.delete("1.0", "end")
                     warns = val.warnings or []
                     self.check_text.insert("1.0", (
-                        (f"정답이 상황 정의와 안 맞는 트랙 {len(warns)}개 (사라진 시점 샘플을 학습에서 뺌).\n"
+                        (f"정답이 상황 정의와 안 맞는 트랙 {len(warns)}개 (조건을 어기는 순간은 '→' 뒤의 가장 비슷한 상황으로 학습).\n"
                          "정답(situation)이나 target_id가 맞는지, 녹화가 그 상황대로 찍혔는지 확인해보세요.\n\n"
                          + "\n".join(warns) if warns else "정답이 상황 정의와 안 맞는 트랙이 없습니다.")
                         + "\n\n" + "-" * 70 + "\n" + self._rules_intro()))
@@ -494,7 +497,8 @@ class TrainApp(ttk.Frame):
             vals = [r[c] for c in RESULT_COLS]
             if r["ok"] == "O":
                 vals[RESULT_COLS.index("why")] = ""
-            iid = self.res_tree.insert("", "end", values=vals, tags=("good" if r["ok"] == "O" else "bad",))
+            tag = {"O": "good", "△": "near"}.get(r["ok"], "bad")
+            iid = self.res_tree.insert("", "end", values=vals, tags=(tag,))
             self._row_files[iid] = (r["file"], r.get("model"))
         txt = []
         if getattr(res, "cv", False):
