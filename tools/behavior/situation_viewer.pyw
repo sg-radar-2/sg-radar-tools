@@ -777,7 +777,7 @@ class Viewer(ttk.Frame):
         verdicts, shown = {}, set()
         for si, label, tr in all_tracks:
             verdicts.setdefault((si, tr.session), []).append(tr)
-        verdicts = {k: C.recording_verdict(v) for k, v in verdicts.items()}
+        verdicts = {k: (C.recording_verdict(v), C.recording_labels(v)) for k, v in verdicts.items()}
         for si, label, tr in all_tracks:
             truth = tr.truth_final or "-"
             vkey = (si, tr.session)
@@ -785,14 +785,14 @@ class Viewer(ttk.Frame):
                 vtxt = ""
             else:
                 shown.add(vkey)
-                v, vp, _ = verdicts[vkey]
-                vtxt = f"{v} {vp:.0%}" + (" (이상)" if v in S.ABNORMAL else "")
+                (v, vp, _), vlabels = verdicts[vkey]
+                vtxt = f"{' + '.join(vlabels)} {vp:.0%}" + (" (이상)" if v in S.ABNORMAL else "")
             beh = ", ".join(f"{b['situation']} {b['prob']:.0%}" + ("(끝)" if b["source"] == "끝날 때" else "")
                             for b in getattr(tr, "behaviors", []))
             cams = ", ".join(f"{c['t'] - tr.t0:.1f}초 {c['situation']}" for c in tr.cameras) or "-"
             if tr.truth_final:
                 n += 1
-                mark = C.match_kind(tr.final_pred, tr.truth_final)   # △: 구분이 어려운 쌍, 오류로 안 셈
+                mark = C.match_labels(C.final_labels(tr), tr.truth_final)   # △: 구분이 어려운 쌍, 오류로 안 셈
                 ok += mark != "X"
                 should = tr.truth_final in S.ABNORMAL
                 cam_good = bool(tr.cameras) == should
@@ -801,7 +801,7 @@ class Viewer(ttk.Frame):
                 cmark = "O" if cam_good else "X"
             else:
                 mark = cmark = "-"
-            iid = self.result.insert("", "end", values=(label, vtxt, C.track_name(tr), truth, tr.final_pred,
+            iid = self.result.insert("", "end", values=(label, vtxt, C.track_name(tr), truth, C.final_text(tr),
                                                         f"{tr.final_prob:.0%}", mark, beh or "-", cams, cmark),
                                      tags=("near",) if mark == "△" else ())
             self._result_map[iid] = (si, tr.session)

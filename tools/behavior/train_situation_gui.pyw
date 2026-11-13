@@ -27,7 +27,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-RESULT_COLS = ("split", "file", "file_verdict", "truth", "track", "dur", "pred", "prob", "ok", "why",
+RESULT_COLS = ("split", "file", "file_verdict", "truth_label", "track", "dur", "pred", "prob", "ok", "why",
                "behaviors", "end", "camera", "file_cam")
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -178,6 +178,7 @@ class TrainApp(ttk.Frame):
         ttk.Label(run, textvariable=self.status, width=40).pack(side="left")
         self.view_btn = ttk.Button(run, text="뷰어에서 보기", command=self.open_viewer, state="disabled")
         self.view_btn.pack(side="left", padx=(6, 0))
+        ttk.Button(run, text="로그 복사", command=self.copy_log).pack(side="left", padx=(6, 0))
 
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, pady=(8, 0))
@@ -245,6 +246,30 @@ class TrainApp(ttk.Frame):
         tt = ttk.Frame(self.nb)
         self.nb.add(tt, text="결정 트리")
         self.tree_text = self._text(tt, ("Consolas", 10), wrap="none")
+
+    def copy_log(self):
+        """결과 요약 + 결과 표(지금 보기 그대로) + 확인 필요 + 진행 기록을 클립보드로 한 번에 복사"""
+        parts = []
+        summary = self.result_summary.get().strip()
+        rows = self.res_tree.get_children()
+        if rows:
+            heads = [self.res_tree.heading(c)["text"] for c in RESULT_COLS]
+            table = ["\t".join(heads)] + ["\t".join(str(v) for v in self.res_tree.item(i, "values"))
+                                          for i in rows]
+            parts.append(f"===== 결과 (보기: {self.split_var.get()}"
+                         f"{', 틀린 것만' if self.only_bad.get() else ''}) =====\n{summary}\n\n" + "\n".join(table))
+        check = self.check_text.get("1.0", "end").strip()
+        if check:
+            parts.append("===== 확인 필요 =====\n" + check)
+        log = self.log.get("1.0", "end").strip()
+        if log:
+            parts.append("===== 진행 기록 =====\n" + log)
+        if not parts:
+            self.status.set("복사할 로그가 없습니다.")
+            return
+        self.clipboard_clear()
+        self.clipboard_append("\n\n".join(parts))
+        self.status.set("로그를 클립보드에 복사했습니다.")
 
     def _table(self, master, cols, heads, widths, pady=(0, 0)):
         box = ttk.Frame(master)

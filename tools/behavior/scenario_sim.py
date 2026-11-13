@@ -203,14 +203,14 @@ def episode(kind: str, rng: random.Random) -> list[Frame]:
         p.mark(t_start + 20, LOITER)
 
     elif kind == REPEAT:
-        # 외곽에서 나타났다가 (레이더 밖으로) 사라지기를 반복. 두 번째로 나타날 때부터 반복 접근
+        # 외곽에서 나타났다가 (레이더 밖으로) 사라지기를 반복. 세 번째로 나타날 때부터 반복 접근
         p = Path_(*_far_point(rng, (6.3, 7.0)))
         t_dec = None
-        for k in range(rng.choice([3, 3, 4])):
+        for k in range(rng.choice([3, 4, 4])):
             p.walk_to(rng.uniform(-0.6, 0.6), rng.uniform(0.6, 1.6), walk())
             p.stay(rng.uniform(0.0, 1.5))
             p.walk_to(*_far_point(rng, (6.3, 7.0)), walk())
-            if k == 0:
+            if k == 1:
                 t_dec = p.t
             p.stay(rng.uniform(1.0, 4.0))
         p.mark(t_dec, REPEAT)

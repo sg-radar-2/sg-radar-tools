@@ -155,7 +155,9 @@ def evaluate(trs: list, models) -> tuple[list, dict, list]:
         cam_good = fired == should
         file_ok += cam_good
         verdict, vprob, _ = C.recording_verdict(ftrs)
-        rec_mark = min((C.match_kind(verdict, e) for e in expect), key="O△X".index)
+        vlabels = C.recording_labels(ftrs)           # 이상 행동 동점이면 여러 개 (모두 판정)
+        verdict = " + ".join(vlabels)
+        rec_mark = min((C.match_labels(vlabels, e) for e in expect), key="O△X".index)
         rec_good = rec_mark != "X"          # △(구분이 어려운 쌍)는 오류로 세지 않음
         rec_ok += rec_good
         rec_near += rec_mark == "△"
@@ -163,7 +165,7 @@ def evaluate(trs: list, models) -> tuple[list, dict, list]:
                      f"[{rec_mark}]")
         for k, tr in enumerate(ftrs):
             truth = C.final_truth(tr) or tr.truth_final    # 정의 조건에 안 맞으면 가장 비슷한 상황
-            mark = C.match_kind(tr.final_pred, truth)
+            mark = C.match_labels(C.final_labels(tr), truth)   # 동점 판정 중 하나라도 맞으면 맞음
             good = mark != "X"
             trk_ok += good
             trk_near += mark == "△"
@@ -179,12 +181,15 @@ def evaluate(trs: list, models) -> tuple[list, dict, list]:
                 "file_ok": rec_good, "file_mark": rec_mark, "verdict": verdict, "rec_truth": "/".join(expect),
                 "first": k == 0,
                 "split": tr.split, "file": fname, "truth": truth, "track": C.track_name(tr),
-                "dur": f"{tr.t[-1]:.1f}초", "pred": tr.final_pred, "prob": f"{tr.final_prob:.0%}",
+                # 표시용: 원래 정답, 정의 조건에 안 맞아 바꿨으면 '원래 → 바꾼 것'
+                "truth_label": tr.truth_final if truth == tr.truth_final else f"{tr.truth_final} → {truth}",
+                "dur": f"{tr.t[-1]:.1f}초", "pred": C.final_text(tr), "pred_main": tr.final_pred,
+                "prob": f"{tr.final_prob:.0%}",
                 "ok": mark, "progress": share_txt, "camera": cams,
                 "file_cam": ("" if k else (f"{'촬영함' if fired else '촬영 안 함'} "
                                            f"({'맞음' if cam_good else '틀림'})")),
             })
-            lines.append(f"    {C.track_name(tr):<8} {tr.t[-1]:5.1f}초  최종 {tr.final_pred} {tr.final_prob:.0%} "
+            lines.append(f"    {C.track_name(tr):<8} {tr.t[-1]:5.1f}초  최종 {C.final_text(tr)} {tr.final_prob:.0%} "
                          f"[{mark}]  / 나온 행동 {beh or '-'}  / 촬영 {cams}")
             if mark != "O":
                 lines.append(f"             근거: {why}")
@@ -311,7 +316,7 @@ def train(labels_path: Path, out_path: Path = DEFAULT_OUT, region="auto", max_r:
              f"학습 트랙 {len(train_trs)}개, 학습 샘플 {len(X)}개 (실제 {n_real}개)",
              "학습 샘플 정답 분포: " + ", ".join(f"{k} {v}" for k, v in Counter(y[:n_real]).items()), ""]
     if n_first_repeat:
-        lines += [f"반복 접근 녹화에서 처음 나타난 사람 {n_first_repeat}명은 아직 반복이 아니라서 "
+        lines += [f"반복 접근 녹화에서 {C.REPEAT_MIN_ENTRIES}번째 전까지 나타난 사람 {n_first_repeat}명은 아직 반복이 아니라서 "
                   "'반복 접근' 대신 가장 비슷한 상황으로 학습했습니다 (정상).", ""]
     if warnings:
         lines += ["[정답이 상황 정의와 안 맞는 트랙] 조건을 어기는 순간은 '→' 뒤의 가장 비슷한 상황으로 학습·평가했습니다. "
@@ -455,7 +460,7 @@ def cross_validate(labels_path: Path, out_path: Path, k: int = 5, seed: int = 0,
                   "없으면 끝날 때 판정(정상 행동). 같은 순위면 확률이 높은 것.",
               "녹화 판정 = 그 녹화의 사람들 최종 판정 중 같은 우선순위로 하나."]
     # 상황별·혼동 행렬 (모든 녹화가 한 번씩 test가 됨)
-    sits = [s for s in S.SITUATIONS + [S.UNDECIDED] if any(r["truth"] == s or r["pred"] == s for r in rows)]
+    sits = [s for s in S.SITUATIONS + [S.UNDECIDED] if any(r["truth"] == s or r["pred_main"] == s for r in rows)]
     lines += ["", "[사람(트랙)별 상황 정답률 (모든 녹화가 한 번씩 test)]"]
     for s in sits:
         rs = [r for r in rows if r["truth"] == s]
@@ -466,7 +471,9 @@ def cross_validate(labels_path: Path, out_path: Path, k: int = 5, seed: int = 0,
             lines.append(f"  {s:<8} {ok}/{len(rs)}"
                          + (f"   △: {', '.join(f'{p} {n}' for p, n in near.items())}" if near else "")
                          + (f"   틀린 것: {', '.join(f'{p} {n}' for p, n in wrong.items())}" if wrong else ""))
-    cm = confusion_matrix([r["truth"] for r in rows], [r["pred"] for r in rows], labels=sits)
+    # 동점으로 여러 개 판정한 트랙은 정답과 맞는 것(없으면 대표 판정)으로 셈
+    cm_pred = [r["truth"] if r["ok"] == "O" else r["pred_main"] for r in rows]
+    cm = confusion_matrix([r["truth"] for r in rows], cm_pred, labels=sits)
     lines += ["", "[최종 판정 혼동 행렬] 행: 정답, 열: 판정", "          " + " ".join(f"{s[:4]:>6}" for s in sits)]
     for s, row in zip(sits, cm):
         lines.append(f"  {s[:6]:<8}" + " ".join(f"{v:>6d}" for v in row))
@@ -483,7 +490,7 @@ def cross_validate(labels_path: Path, out_path: Path, k: int = 5, seed: int = 0,
     if bad:
         lines += ["", f"[틀린 트랙 {len(bad)}개]"]
         for r in bad:
-            lines.append(f"  {r['split']} {r['file']:<10} {r['track']:<10} 정답 {r['truth']} → {r['pred']} {r['prob']}"
+            lines.append(f"  {r['split']} {r['file']:<10} {r['track']:<10} 정답 {r['truth_label']} / 판정 {r['pred']} {r['prob']}"
                          f"   나온 행동: {r.get('behaviors') or '-'}   근거: {r.get('why', '')}")
     if warnings:
         lines += ["", "[정답이 상황 정의와 안 맞는 트랙] ('→' 뒤의 가장 비슷한 상황으로 학습)"] + ["  " + w for w in warnings]

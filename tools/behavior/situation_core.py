@@ -32,10 +32,11 @@ from scenario_sim import (ABNORMAL, M_APPROACH, M_LEAVE, M_PASS, M_STILL,  # noq
 
 HERE = Path(__file__).resolve().parent
 MODEL_PATH = HERE / "models" / "situation_trees.pkl"
-MODEL_VERSION = 4          # 2: 트랙 잇기(멈춘 사람) + 특징 27개, 방문·배달 분리
+MODEL_VERSION = 5         # 2: 트랙 잇기(멈춘 사람) + 특징 27개, 방문·배달 분리
                            # 3: 트랙 시작 직후(속도를 아직 못 구하는 구간)를 정지로 세던 버그 수정,
                            #    '문에서 나옴'을 처음 움직임 방향으로 판단, 특징 5개 추가(32개), 상황 정의 조건(RULES) 적용
                            # 4: '도어락 조작 시도' 상황 삭제, '문에서 나옴'을 첫 프레임 거리(1.2m)+방향으로 판단
+                           # 5: 반복 접근 기준 2번 → 3번 (가짜 데이터 정답 시점도 세 번째 등장으로)
 M_UNKNOWN = "판단 전"      # 트랙 시작 직후 속도를 아직 구할 수 없는 구간 (정지·움직임 어느 쪽으로도 안 셈)
 
 # --- 전처리·판정 상수
@@ -75,6 +76,14 @@ HIDDEN_STEP_S = 0.2      # 안 보이는 정지 구간을 이 간격의 가짜 �
 REENTRY_MAX_GAP_S = 30.0 # 외곽으로 나갔다가 이 시간 안에
 REENTRY_DIST = 1.2       # 나간 자리에서 이 거리 안에서 다시 나타나면 같은 사람
 ENTRY_WINDOW_S = 60.0    # 최근 이 시간 동안 외곽에서 들어온 횟수 (반복 접근)
+DOOR_DWELL_EXEMPT_MAX_S = 120.0  # 문에서 나온 사람의 장시간 체류 면제는 범위 안에 이 시간 전까지만
+                                 # (문 옆 사각지대에 숨어 있다가 문 앞에서 나타난 사람이 '문에서 나옴'으로 잡혀도
+                                 #  이보다 오래 머물면 장시간 체류가 될 수 있게. 엘리베이터 대기는 보통 1~2분 안)
+DWELL_MIN_S = 15.0       # 장시간 체류: 범위 안에 이 시간 이상 있어야 함 (예: 1-9, 4.2초 통과가 체류로 촬영됨)
+RETURN_MAX_DX = 1.5      # 배달은 들어온 쪽으로 되돌아가고 통과는 가로질러 감: 사라질 때 처음 잡힌 곳에서 좌우로
+                         # 이 거리 미만이면 '되돌아감'(배달 가능, 통과 아님), 이상이면 '지나감'(통과 가능, 배달 아님)
+REPEAT_MIN_ENTRIES = 3# 반복 접근: 최근 ENTRY_WINDOW_S초 안에 이 횟수 이상 나타나야 함
+                         # (2번이면 한 번 왔다 간 사람이 다시 오기만 해도 반복 접근이 됨, 예: 2-1 귀가)
 STOP_SPEED = 0.35        # 사라지기 직전 1초 동안 이보다 느렸으면 '멈춰서 놓친 것' (빠르면 그냥 트래킹 실패)
 AWAY_R = 1.2             # 문에서 이 거리 밖에서 멈춰 있으면 '문에서 떨어져 정지' (엘리베이터 대기 등)
 SIDE_CHANGE_DX = 1.0     # 처음 잡힌 곳과 x 부호가 반대이고 이만큼 옆으로 갔으면 '문 반대편으로 건너감' (통과)
@@ -137,7 +146,7 @@ FEATURE_KO = {
     "moving_s": "움직인 시간(초)", "spread": "머문 범위(m, 위치 퍼짐)",
     "appear_edge_d": "처음 잡힌 곳~외곽 거리(m, 작으면 외곽에서 들어옴)",
     "cur_edge_d": "현재 위치~외곽 거리(m)", "ended_at_door": "문으로 사라짐(1=예)",
-    "ended_at_edge": "외곽으로 사라짐(1=예)", "edge_entries": f"최근 {int(ENTRY_WINDOW_S)}초 사이 나타난 횟수",
+    "ended_at_edge": "외곽으로 사라짐(1=예)", "edge_entries": f"최근 {int(ENTRY_WINDOW_S)}초 사이 이 사람이 나타난 횟수",
     "lateral_disp": "처음 잡힌 곳에서 옆(x)으로 간 거리(m)",
     "side_change": "문 반대편으로 건너감(1=예)",
     "net_dr": "처음 잡힌 곳보다 문에서 멀어진 거리(m, -는 가까워짐)",
@@ -449,7 +458,7 @@ def confirm_motion(t: np.ndarray, raw: np.ndarray) -> np.ndarray:
 
 def situation_features(tr: Track, region: "Region | None" = None, entry_times=None) -> None:
     """프레임마다 '지금까지의 흐름' 특징. 마지막에 사라진 시점의 특징(ended=1 등)도 만든다.
-    region이 있으면 외곽까지 거리를 계산하고, entry_times(같은 세션에서 외곽으로 들어온 시각들)로
+    region이 있으면 외곽까지 거리를 계산하고, entry_times(이 사람이 나타난 시각들: 처음 + 외곽으로 나갔다 다시 들어온 때)로
     반복 접근 특징을 만든다."""
     t, r, xs, ys, m = tr.t, tr.r, tr.xs, tr.ys, tr.motion
     hid = tr.hidden if tr.hidden is not None else np.zeros(len(t), dtype=bool)
@@ -786,12 +795,11 @@ def assemble(tracks: list[Track], region: "Region | None", motion_tree) -> tuple
             by_session.setdefault(c.session, []).append(c)
     for session, trs in by_session.items():
         people = stitch(trs, region)
-        # 문이 아닌 곳에서 나타난 횟수 (새 사람 + 외곽으로 나갔다 다시 들어온 사람). 영역 안에서 멈췄다
-        # 다시 움직인 경우는 이미 이어 붙였으므로 세지 않음. 레이더는 걷기 시작하고 조금 지나서 잡기 때문에
-        # 외곽보다 안쪽에서 처음 잡히는 경우가 많아서 외곽만 세지 않음
-        entries = sorted(t for p in people for t in (p.entry_times or []))
+        # 반복 접근은 '한 사람'이 여러 번 나타난 것: 그 사람의 등장 시각만 셈 (처음 등장 + 외곽으로 나갔다
+        # 다시 들어와서 이어 붙인 등장). 다른 트랙(뒤쪽 사물이 끊겼다 잡히는 것, 다른 사람)은 세지 않음
+        # (예전엔 세션 전체를 세서 2-1·4-2·8-3에서 뒤쪽 사물 때문에 반복 접근이 나왔음)
         for p in people:
-            _prepare(p, motion_tree, region, entries)
+            _prepare(p, motion_tree, region, sorted(p.entry_times or []))
         inside += people
     for c in outside:
         _prepare(c, motion_tree, region, None)
@@ -909,11 +917,33 @@ def assign_fallback(trs: list[Track], tree) -> None:
         idx = [i for i in snap_index(tr) if tr.truth_situation[i] != UNDECIDED
                and rule_violations(tr.truth_situation[i], tr.sfeat[i], False)]
         for i in idx:
-            alt = _similar(tree, tr.sfeat[i], False, tr.truth_situation[i])
+            alt = (_defined_fallback(tr.truth_situation[i], tr.sfeat[i], False)
+                   or _similar(tree, tr.sfeat[i], False, tr.truth_situation[i]))
             if alt:
                 tr.fallback[i] = alt
         if final_ok(tr):
-            tr.final_fallback = _similar(tree, tr.final_feat, True, tr.truth_final)
+            tr.final_fallback = (_defined_fallback(tr.truth_final, tr.final_feat, True)
+                                 or _similar(tree, tr.final_feat, True, tr.truth_final))
+
+
+# 정답이 정의 조건에 안 맞을 때 정의상 가장 가까운 상황 (앞에서부터 조건을 지키는 첫 상황).
+# 여기서 못 고르면 임시 트리에서 가장 비슷한 상황을 고른다.
+DEFINED_FALLBACK = {
+    "배회": ["장시간 체류"],          # 덜 움직였으면 서 있던 것
+    "장시간 체류": ["배회", "외출"],  # 많이 걸어 다녔으면 배회, 문에서 나왔으면 외출
+    "통과": ["배달", "외출"],         # 되돌아갔으면 배달, 문에서 나왔으면 외출
+    "배달": ["통과", "외출"],         # 가로질러 갔으면 통과, 문에서 나왔으면 외출
+    "외출": ["통과", "배달"],         # 문에서 나온 게 아니면 지나간 사람
+    "방문": ["귀가"],
+    "귀가": ["방문"],
+}
+
+
+def _defined_fallback(orig: str, feat: np.ndarray, final: bool) -> str | None:
+    for c in DEFINED_FALLBACK.get(orig, []):
+        if not rule_violations(c, feat, final):
+            return c
+    return None
 
 
 def _snapshots(tr: Track, final: bool = True):
@@ -1129,13 +1159,24 @@ RULES = [
     ("귀가", True, "문으로 사라져야 함", _at_door_end),
     ("방문", True, "문으로 사라져야 함 (집 안으로 들어감)", _at_door_end),
     ("배달", True, "외곽(구역 바깥)으로 나가야 함", _at_edge_end),
+    ("배달", False, "바깥에서 온 사람이어야 함 (문에서 나왔으면 배달 아님)", lambda f: f["appear_door"] < 0.6),
+    ("배달", True, f"들어온 쪽으로 되돌아가야 함 (처음 잡힌 곳에서 좌우로 {RETURN_MAX_DX:g}m 넘게 가면 통과)",
+     lambda f: f["lateral_disp"] < RETURN_MAX_DX),
+    ("장시간 체류", False, f"범위 안에 {int(DWELL_MIN_S)}초 이상 있어야 함 (멈춘 시간 포함)",
+     lambda f: f["elapsed"] >= DWELL_MIN_S),
+    ("장시간 체류", False, f"문에서 나온 사람은 {int(DOOR_DWELL_EXEMPT_MAX_S)}초 전까지 장시간 체류 아님 "
+     f"(엘리베이터 대기 등은 외출. 그보다 오래 있으면 사각지대에서 나타난 사람일 수 있어 체류 가능)",
+     lambda f: f["appear_door"] < 0.6 or f["elapsed"] >= DOOR_DWELL_EXEMPT_MAX_S),
     ("외출", False, "문에서 나온 사람이어야 함", lambda f: f["appear_door"] >= 0.6),
     ("외출", False, f"처음 잡힌 곳보다 문에 {OUT_MAX_APPROACH}m 이상 다가가면 외출 아님",
      lambda f: f["approach_depth"] < OUT_MAX_APPROACH),
-    ("외출", True, "문으로 사라지면 외출 아님", lambda f: f["ended_at_door"] < 0.5),
-    ("통과", True, "문으로 사라지면 통과 아님", lambda f: f["ended_at_door"] < 0.5),
+    ("외출", True, "문으로 사라지면(또는 녹화 끝까지 문 앞에 있으면) 외출 아님", lambda f: not _at_door_end(f)),
+    ("통과", True, "문으로 사라지면(또는 녹화 끝까지 문 앞에 있으면) 통과 아님", lambda f: not _at_door_end(f)),
     ("통과", False, "문에서 나온 사람이면 통과 아님 (외출)", lambda f: f["appear_door"] < 0.6),
-    ("반복 접근", False, f"최근 {int(ENTRY_WINDOW_S)}초 안에 2번 이상 나타나야 함", lambda f: f["edge_entries"] >= 2),
+    ("통과", True, f"지나가야 함 (처음 잡힌 곳에서 좌우로 {RETURN_MAX_DX:g}m 미만이면 들어온 쪽으로 되돌아간 것)",
+     lambda f: f["lateral_disp"] >= RETURN_MAX_DX),
+    ("반복 접근", False, f"최근 {int(ENTRY_WINDOW_S)}초 안에 {REPEAT_MIN_ENTRIES}번 이상 나타나야 함",
+     lambda f: f["edge_entries"] >= REPEAT_MIN_ENTRIES),
     ("배회", False, f"범위 안에 {int(LOITER_MIN_S)}초 이상 있어야 함 (멈춘 시간 포함)",
      lambda f: f["elapsed"] >= LOITER_MIN_S),
     ("배회", False, f"그동안 {int(LOITER_MIN_MOVE_FRAC * 100)}% 이상 움직여야 함 (서 있기만 하면 장시간 체류)",
@@ -1230,13 +1271,13 @@ PRIORITY_OVERRIDES = {
 }
 
 
-def apply_overrides(cands: dict) -> tuple[dict, list[str]]:
-    """PRIORITY_OVERRIDES를 적용한 후보와 뺀 내용 설명"""
+def apply_overrides(cands: dict, keep: set | None = None) -> tuple[dict, list[str]]:
+    """PRIORITY_OVERRIDES를 적용한 후보와 뺀 내용 설명. keep에 든 상황은 빼지 않음 (면제 시간 상한을 넘김 등)"""
     out, notes = dict(cands), []
     for win, losers in PRIORITY_OVERRIDES.items():
         if win in out:
             for lose in losers:
-                if lose in out:
+                if lose in out and lose not in (keep or set()):
                     del out[lose]
                     notes.append(f"{win}이면 {lose}은 뺌")
     return out, notes
@@ -1255,6 +1296,14 @@ def priority_pick(cands: dict) -> tuple[str, float]:
     pool = abn or [k for k in key if k != UNDECIDED] or list(key)
     best = max(pool, key=lambda k: key[k])
     return best, float(key[best][0])
+
+
+def priority_ties(cands: dict, best: str) -> list[str]:
+    """best와 같은 확률로 동점인 다른 이상 행동들 (둘 다 판정으로 냄). 정상 행동은 하나만."""
+    if best not in ABNORMAL:
+        return []
+    p = lambda v: round((v if isinstance(v, tuple) else (v,))[0], 2)  # noqa: E731
+    return [k for k, v in cands.items() if k != best and k in ABNORMAL and p(v) == p(cands[best])]
 
 
 def predict(tracks: list[Track], models: Models) -> list[Track]:
@@ -1285,7 +1334,8 @@ def predict(tracks: list[Track], models: Models) -> list[Track]:
         ff = dict(zip(SITUATION_FEATURES, tr.final_feat))
         dur = float(ff["elapsed"])
         # 문에서 나온 사람(외출 조건을 지킴)은 짧아도 통과로 밀지 않음 (나오자마자 범위를 벗어나는 외출이 많음)
-        if dur <= SHORT_TRACK_S and ff["appear_door"] < 0.6 and PASS in ftree.classes_:
+        if (dur <= SHORT_TRACK_S and ff["appear_door"] < 0.6 and not _at_door_end(ff)
+                and PASS in ftree.classes_):
             boost = {PASS: SHORT_PASS_WEIGHT}
             k = list(ftree.classes_).index(PASS)
             before = fp[k]
@@ -1348,17 +1398,26 @@ def predict(tracks: list[Track], models: Models) -> list[Track]:
         sus = _sustained(tr)
         # 후보: (확률, 끝날 때 판정과 같은지, 이어진 시간). 정상 행동은 끝날 때 정의 조건을 지키는 것만
         cands = {}
+        end_normal = tr.end_pred != UNDECIDED and tr.end_pred not in ABNORMAL
         for k, v in sus.items():
+            # 정상 행동끼리는 끝날 때 판정 우선 (어디로 사라졌는지를 봐야 정상 행동이 갈림. 예: 5-6 진행 중 통과 > 끝 배달)
+            if k not in ABNORMAL and end_normal and k != tr.end_pred:
+                continue
             if k in ABNORMAL or not rule_violations(k, tr.final_feat, True):
                 cands[k] = (v["prob"], k == tr.end_pred, v["dur"])
         if tr.end_pred != UNDECIDED and (tr.end_pred not in ABNORMAL or tr.end_prob >= CAMERA_PROB
                                          or not cands):
             old = cands.get(tr.end_pred, (0.0, True, 0.0))
             cands[tr.end_pred] = (max(old[0], tr.end_prob), True, old[2])
-        cands, override_notes = apply_overrides(cands)
+        # 문에서 나왔어도 DOOR_DWELL_EXEMPT_MAX_S 넘게 머물렀으면 '외출 > 장시간 체류' 예외를 쓰지 않음
+        # (문 옆 사각지대에 숨어 있다가 나타난 사람이 외출로 가려지지 않게)
+        long_stay = tr.final_feat[SITUATION_FEATURES.index("elapsed")] >= DOOR_DWELL_EXEMPT_MAX_S
+        cands, override_notes = apply_overrides(cands, keep={"장시간 체류"} if long_stay else None)
         best, prob = priority_pick(cands)
+        tr.final_also = []
         if best != UNDECIDED:
             tr.final_pred, tr.final_prob = best, prob
+            tr.final_also = priority_ties(cands, best)
         # 이 사람에게서 나온 행동들 (화면 표시용): 진행 중 1초 넘게 이어진 것 + 끝날 때 판정
         tr.behaviors = []
         for k, v in sorted(sus.items(), key=lambda kv: (kv[0] not in ABNORMAL, -kv[1]["prob"])):
@@ -1378,7 +1437,24 @@ def predict(tracks: list[Track], models: Models) -> list[Track]:
         if override_notes:
             tr.rule_note = ("우선순위 예외: " + ", ".join(override_notes)
                             + (f" / {tr.rule_note}" if tr.rule_note else ""))
+        if tr.final_also:
+            tr.rule_note = (f"이상 행동 동점({tr.final_prob:.0%}): {' + '.join(final_labels(tr))} 모두 판정"
+                            + (f" / {tr.rule_note}" if tr.rule_note else ""))
     return tracks
+
+
+def final_labels(tr: Track) -> list[str]:
+    """최종 판정 목록: 대표 판정 + 같은 확률로 동점인 이상 행동들 (예: 반복 접근 100% + 배회 100%)"""
+    return [tr.final_pred] + list(getattr(tr, "final_also", []) or [])
+
+
+def final_text(tr: Track) -> str:
+    return " + ".join(final_labels(tr))
+
+
+def match_labels(preds: list[str], truth: str) -> str:
+    """판정 여러 개 중 정답과 가장 잘 맞는 것의 비교 결과 (O > △ > X)"""
+    return min((match_kind(p, truth) for p in preds), key="O△X".index)
 
 
 def recording_verdict(tracks: list[Track]) -> tuple[str, float, "Track | None"]:
@@ -1388,14 +1464,31 @@ def recording_verdict(tracks: list[Track]) -> tuple[str, float, "Track | None"]:
               and getattr(t, "final_pred", UNDECIDED) != UNDECIDED]
     if not people:
         return UNDECIDED, 0.0, None
+    cands, who = _recording_cands(people)
+    best, prob = priority_pick(cands)
+    return best, prob, who.get(best)
+
+
+def _recording_cands(people: list) -> tuple[dict, dict]:
     cands: dict = {}
     who: dict = {}
     for t in people:
         v = (t.final_prob, float(t.t[-1]))             # 확률이 같으면 오래 잡힌 사람
-        if t.final_pred not in cands or v > cands[t.final_pred]:
-            cands[t.final_pred], who[t.final_pred] = v, t
-    best, prob = priority_pick(cands)
-    return best, prob, who.get(best)
+        for lab in final_labels(t):                    # 동점으로 같이 판정한 이상 행동도 후보
+            if lab not in cands or v > cands[lab]:
+                cands[lab], who[lab] = v, t
+    return cands, who
+
+
+def recording_labels(tracks: list[Track]) -> list[str]:
+    """녹화 판정 목록: recording_verdict의 판정 + 같은 확률로 동점인 다른 이상 행동들"""
+    people = [t for t in tracks if not getattr(t, "out_of_range", False)
+              and getattr(t, "final_pred", UNDECIDED) != UNDECIDED]
+    if not people:
+        return [UNDECIDED]
+    cands, _ = _recording_cands(people)
+    best, _ = priority_pick(cands)
+    return [best] + priority_ties(cands, best)
 
 
 def describe_path(tr: Track, region: "Region | None") -> str:
