@@ -469,10 +469,10 @@ class Viewer(ttk.Frame):
                                         f"{c['situation']} ({c['prob']:.0%})")
         if not self._cams:
             self.cam_list.insert("end", f"(최근 {LIVE_WINDOW_S:.0f}초 동안 촬영 없음)")
-        new = {(round(t, 1), c["situation"]) for t, _, c in self._cams} - self._live_cams
-        if new:
+        cur = {(round(t, 1), c["situation"]) for t, _, c in self._cams}
+        if cur - self._live_cams:
             self.bell()                   # 새 촬영 알림
-            self._live_cams |= new
+        self._live_cams = cur             # 창(180초) 밖으로 나간 촬영은 잊음 (계속 쌓이지 않게)
         keep = self.cur_t
         self._setup_axes()
         self.cur_t = self.t_hi if self._live_follow else min(max(keep, self.t_lo), self.t_hi)
